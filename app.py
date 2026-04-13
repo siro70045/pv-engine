@@ -232,8 +232,8 @@ def map_phase2(c_lat, c_lon, buildings, s_lat=None, s_lon=None, h=520):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def step_posizione():
-    st.markdown("### Where is the building located?")
-    st.caption("Search for the address, then click the map in two steps.")
+    st.markdown("### Location")
+    st.caption("Search for the address, then locate your building on the map.")
 
     # Geocoding
     ca, cb = st.columns([4,1])
@@ -242,7 +242,7 @@ def step_posizione():
                              placeholder="E.g. 14 High Street, London",
                              label_visibility="collapsed")
     with cb:
-        search = st.button("🔍 Search", use_container_width=True)
+        search = st.button("Search", use_container_width=True)
 
     if search and addr.strip():
         with st.spinner("Searching…"):
@@ -293,7 +293,7 @@ def step_posizione():
     if phase == "p1":
         nb = len(buildings)
         st.markdown(
-            f"**Step 1 of 2** — Click on the **centre of your building**."
+            f"**Step 1 of 2** — Click on the centre of your building."
             + (f" ({nb} OSM building outlines loaded)" if nb else "")
         )
         md = map_phase1(geo_lat, geo_lon, buildings)
@@ -339,7 +339,7 @@ def step_posizione():
     elif phase == "p2":
         c_lat = ss("center_lat")
         c_lon = ss("center_lon")
-        st.markdown("**Step 2 of 2** — Click on the **roof side facing the sun**.")
+        st.markdown("**Step 2 of 2** — Click on the roof side facing the sun.")
         st.caption("The orange arrow shows the direction you are selecting.")
 
         md = map_phase2(c_lat, c_lon, buildings, ss("sun_lat"), ss("sun_lon"))
@@ -371,7 +371,7 @@ def step_posizione():
                 st.rerun()
         with nb_:
             ok = az is not None
-            if st.button("✅ Confirm", type="primary" if ok else "secondary",
+            if st.button("Confirm", type="primary" if ok else "secondary",
                          use_container_width=True, disabled=not ok):
                 with st.spinner("Downloading climate data from PVGIS…"):
                     try:
@@ -424,14 +424,14 @@ def step_posizione():
             t_m = sum(m_.T_avg)/12
             bm  = m_.GHI_monthly.index(max(m_.GHI_monthly))
             st.markdown(
-                f'<div class="good">☀️ <strong>Climate data ready</strong> — '
+                f'<div class="good"><strong>Climate data ready</strong> — '
                 f'GHI {ghi:.0f} kWh/m²/yr · T̄ {t_m:.1f}°C · '
                 f'Best month: {MESI[bm]} ({m_.GHI_monthly[bm]:.0f} kWh/m²)'
                 f'</div>', unsafe_allow_html=True)
 
         ma, mb = st.columns([1,2])
         with ma:
-            if st.button("✏️ Edit location", use_container_width=True):
+            if st.button("Edit location", use_container_width=True):
                 sset(map_phase="p1", center_lat=None, center_lon=None,
                      sun_lat=None, sun_lon=None, azimuth_from_map=None,
                      last_click_key="", tmy_data=None, tmy_key=None,
@@ -449,15 +449,15 @@ def step_posizione():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def step_edificio():
-    st.markdown("### What type of building is it?")
+    st.markdown("### Building")
 
     st.markdown('<div class="slbl">Building type</div>', unsafe_allow_html=True)
     tipo_opts = {
-        "🏠 House / Apartment":           "residential",
-        "🏭 Warehouse / Factory":          "warehouse",
-        "🏢 Offices / Commercial":         "office",
-        "⚙️ Industrial plant":             "industrial",
-        "🏪 Shop / Retail":                "retail",
+        "House / Apartment":              "residential",
+        "Warehouse / Factory":            "warehouse",
+        "Offices / Commercial":           "office",
+        "Industrial plant":               "industrial",
+        "Shop / Retail":                  "retail",
     }
     tlbl = st.radio("Type", list(tipo_opts.keys()),
                     index=list(tipo_opts.values()).index(ss("building_type","warehouse")),
@@ -480,7 +480,7 @@ def step_edificio():
             osm_area = polygon_area_m2(cl.coords)
 
     if osm_area and osm_area > 10:
-        st.caption(f"📐 Estimated from OSM building outline: **{osm_area:.0f} m²**")
+        st.caption(f"Estimated from OSM building outline: **{osm_area:.0f} m²**")
         if st.checkbox("Use this estimate", value=True, key="use_osm_area"):
             floor_area = osm_area
         else:
@@ -494,24 +494,56 @@ def step_edificio():
 
     st.divider()
 
-    st.markdown('<div class="slbl">How is the building used?</div>',
+    st.markdown('<div class="slbl">How is the home occupied?</div>',
                 unsafe_allow_html=True)
+
+    # Residential occupancy profiles — the key dimension for PV self-consumption
+    # is WHEN people are home during the day (when PV produces).
+    # We define 5 realistic household types.
+    #
+    # (occ_days, hour_start)
+    # occ_days   : average days/week with significant occupancy (scales kWh)
+    # hour_start : hour from which full occupancy begins on occupied days
+    #              (0 = all day, 14 = home from 14:00 onwards)
+    #
+    # Note: hours before hour_start use a 25% standby load
+    # (fridge, router, standby devices — always present even when empty).
+
     occ_opts = {
-        "Always occupied (main residence or full-time office)":        (7.0, 0),
-        "Weekdays only (Mon–Fri, full day)":                            (5.0, 7),
-        "Part-time (evenings, weekends, or a few days per week)":       (3.5, 13),
-        "Occasional use (holiday home, storage, infrequent access)":   (2.0, 17),
+        "Home all day — retired, remote worker, carer":
+            (7.0, 0,
+             "High daytime consumption → best match for PV. Expected self-consumption: 45–65%."),
+
+        "Home mornings & evenings — short commute or school run":
+            (6.5, 9,
+             "Some daytime load (appliances, partial WFH). Expected self-consumption: 35–50%."),
+
+        "Away most of the day — office worker (back ~17–18h)":
+            (5.0, 17,
+             "Low daytime consumption on weekdays, higher at weekends. Expected self-consumption: 20–35%."),
+
+        "Mostly away until mid-afternoon — back ~14–15h":
+            (5.5, 14,
+             "Moderate daytime load (appliances, some WFH on some days). Expected self-consumption: 28–42%."),
+
+        "Holiday home / rarely occupied":
+            (1.5, 0,
+             "Minimal consumption — mostly standby. PV economics depend almost entirely on export."),
     }
+
+    # Recover previously saved selection
     prev_key = next(
-        (k for k,(d,h) in occ_opts.items()
+        (k for k,(d,h,_) in occ_opts.items()
          if d==ss("occ_days",7.0) and h==ss("occ_hour",0)),
         list(occ_opts.keys())[0]
     )
-    olbl = st.radio("Occupancy", list(occ_opts.keys()),
+    olbl = st.radio("Occupancy profile", list(occ_opts.keys()),
                     index=list(occ_opts.keys()).index(prev_key),
                     label_visibility="collapsed")
-    occ_days, occ_hour = occ_opts[olbl]
+    occ_days, occ_hour, occ_hint = occ_opts[olbl]
     sset(occ_days=occ_days, occ_hour=occ_hour)
+
+    st.caption(occ_hint)
 
     st.divider()
     ca, cb = st.columns(2)
@@ -526,94 +558,215 @@ def step_edificio():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def step_bollette():
-    st.markdown("### Enter your utility bill data")
+    st.markdown("### Utility bills")
     st.caption(
-        "Copy monthly consumption figures from your bills — "
-        "find them in the annual summary or monthly breakdown. "
-        "More precise data means more accurate results."
+        "Enter your consumption and the total amount you pay — "
+        "no need to calculate unit prices."
     )
 
-    prev_el  = ss("monthly_el",  [0]*12)
-    prev_gas = ss("monthly_gas", [0]*12)
-
-    # ── Elettricità ────────────────────────────────────────────────────────────
-    st.markdown('<div class="slbl">⚡ Monthly electricity consumption [kWh]</div>',
-                unsafe_allow_html=True)
-    el_vals = []
-    row1, row2 = st.columns(6), st.columns(6)
-    for i in range(12):
-        col = row1[i] if i < 6 else row2[i-6]
-        with col:
-            v = st.number_input(MESI[i], value=int(prev_el[i]),
-                                min_value=0, step=10, key=f"el_{i}")
-            el_vals.append(v)
-
-    total_el = sum(el_vals)
-    sset(monthly_el=el_vals)
-
-    c1, c2, c3 = st.columns([2,1,1])
-    with c1: st.metric("Annual total", f"{total_el:,.0f} kWh/yr")
-    with c2:
-        el_price = st.number_input("Purchase price [€/kWh]",
-                                   value=float(ss("el_price",0.22)),
-                                   min_value=0.05, max_value=0.80,
-                                   format="%.3f",
-                                   help="Total bill € ÷ kWh consumed")
-        sset(el_price=el_price)
-    with c3:
-        exp_price = st.number_input("Export rate [€/kWh]",
-                                    value=float(ss("export_price",0.08)),
-                                    min_value=0.0, max_value=0.30, format="%.3f",
-                                    help="Feed-in tariff / net metering: ~0.07–0.12 €/kWh")
-        sset(export_price=exp_price)
+    # ── Input mode: monthly vs annual ────────────────────────────────────────
+    st.markdown('<div class="slbl">Input mode</div>', unsafe_allow_html=True)
+    mode = st.radio(
+        "mode",
+        ["Monthly breakdown", "Annual total only"],
+        index=0 if ss("bill_mode","monthly") == "monthly" else 1,
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    sset(bill_mode="monthly" if mode == "Monthly breakdown" else "annual")
 
     st.divider()
 
-    # ── Gas ────────────────────────────────────────────────────────────────────
+    # ── Electricity ───────────────────────────────────────────────────────────
+    st.markdown('<div class="slbl">Electricity</div>', unsafe_allow_html=True)
+
+    if mode == "Monthly breakdown":
+        st.caption("Consumption in kWh — from the monthly or quarterly bill.")
+        prev_el = ss("monthly_el", [0]*12)
+        el_vals = []
+        row1, row2 = st.columns(6), st.columns(6)
+        for i in range(12):
+            col = row1[i] if i < 6 else row2[i-6]
+            with col:
+                v = st.number_input(MESI[i], value=int(prev_el[i]),
+                                    min_value=0, step=10, key=f"el_{i}")
+                el_vals.append(v)
+        total_el = sum(el_vals)
+        sset(monthly_el=el_vals)
+
+        # Bill cost — monthly or annual
+        st.caption("Total amount paid (all-in, as shown on bill).")
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            el_bill_annual = st.number_input(
+                "Total annual electricity cost [€/year]",
+                value=float(ss("el_bill_annual", 0)),
+                min_value=0.0, step=10.0, format="%.0f",
+                help="Sum of all electricity bills over 12 months",
+            )
+        with bc2:
+            el_bill_monthly = st.number_input(
+                "Average monthly electricity cost [€/month]",
+                value=float(ss("el_bill_monthly", 0)),
+                min_value=0.0, step=5.0, format="%.0f",
+                help="Typical monthly bill — we will multiply by 12",
+            )
+        # Derive annual cost: prefer annual if filled, else monthly×12
+        if el_bill_annual > 0:
+            _el_cost = el_bill_annual
+        elif el_bill_monthly > 0:
+            _el_cost = el_bill_monthly * 12
+        else:
+            _el_cost = 0.0
+        sset(el_bill_annual=el_bill_annual,
+             el_bill_monthly=el_bill_monthly)
+
+    else:  # Annual total only
+        st.caption("Enter your annual electricity consumption and cost.")
+        ac1, ac2 = st.columns(2)
+        with ac1:
+            total_el = st.number_input(
+                "Annual consumption [kWh/year]",
+                value=int(ss("annual_el_kwh", sum(ss("monthly_el",[0]*12)))),
+                min_value=0, step=100,
+            )
+        with ac2:
+            el_bill_annual_only = st.number_input(
+                "Annual electricity cost [€/year]",
+                value=float(ss("el_bill_annual", 0)),
+                min_value=0.0, step=50.0, format="%.0f",
+            )
+        _el_cost = el_bill_annual_only
+        el_vals = [total_el / 12] * 12
+        sset(monthly_el=el_vals, annual_el_kwh=total_el,
+             el_bill_annual=el_bill_annual_only)
+
+    # Derive implied unit price for the engine (cost / kWh, fallback 0.22)
+    if _el_cost > 0 and total_el > 0:
+        _el_price = _el_cost / total_el
+    else:
+        _el_price = 0.22   # fallback: typical Italian all-in price
+    sset(el_price=_el_price, monthly_el=el_vals)
+
+    # Summary row
+    sc1, sc2, sc3 = st.columns(3)
+    sc1.metric("Annual consumption", f"{total_el:,.0f} kWh")
+    sc2.metric("Annual cost",
+               f"€ {_el_cost:,.0f}" if _el_cost > 0 else "not entered")
+    sc3.metric("Implied unit price",
+               f"{_el_price:.3f} €/kWh" if _el_cost > 0 else "default 0.22 €/kWh")
+
+    # Export rate (kept but with simpler label)
+    st.caption("Grid export rate — check your contract or use the default.")
+    exp_price = st.number_input(
+        "Export / feed-in rate [€/kWh]",
+        value=float(ss("export_price", 0.08)),
+        min_value=0.0, max_value=0.30, format="%.3f",
+        help="Typical range: 0.07–0.12 €/kWh (GSE ritiro dedicato or SSP)",
+    )
+    sset(export_price=exp_price)
+
+    st.divider()
+
+    # ── Gas ───────────────────────────────────────────────────────────────────
     has_gas = st.toggle("The building also uses gas",
                         value=bool(ss("has_gas", False)))
     sset(has_gas=has_gas)
 
     if has_gas:
-        st.markdown('<div class="slbl">🔥 Monthly gas consumption [Sm³]</div>',
-                    unsafe_allow_html=True)
-        gas_vals = []
-        gr1, gr2 = st.columns(6), st.columns(6)
-        for i in range(12):
-            col = gr1[i] if i < 6 else gr2[i-6]
-            with col:
-                v = st.number_input(MESI[i], value=int(prev_gas[i]),
-                                    min_value=0, step=5, key=f"gas_{i}")
-                gas_vals.append(v)
+        st.markdown('<div class="slbl">Gas</div>', unsafe_allow_html=True)
 
-        total_gas = sum(gas_vals)
-        sset(monthly_gas=gas_vals)
+        if mode == "Monthly breakdown":
+            st.caption("Consumption in Sm³ — from the bi-monthly or quarterly bill.")
+            prev_gas = ss("monthly_gas", [0]*12)
+            gas_vals = []
+            gr1, gr2 = st.columns(6), st.columns(6)
+            for i in range(12):
+                col = gr1[i] if i < 6 else gr2[i-6]
+                with col:
+                    v = st.number_input(MESI[i], value=int(prev_gas[i]),
+                                        min_value=0, step=5, key=f"gas_{i}")
+                    gas_vals.append(v)
+            total_gas = sum(gas_vals)
+            sset(monthly_gas=gas_vals)
 
-        g1, g2, g3 = st.columns([2,1,1])
-        with g1: st.metric("Annual total", f"{total_gas:,.0f} Sm³/yr")
-        with g2:
-            gas_price = st.number_input("Gas price [€/Sm³]",
-                                        value=float(ss("gas_price",0.95)),
-                                        min_value=0.10, max_value=3.0,
-                                        format="%.3f",
-                                        help="Total bill € ÷ Sm³ consumed")
-            sset(gas_price=gas_price)
-        with g3:
-            terminal = st.selectbox(
-                "Heating terminals",
-                ["fan_coil","radiant_floor","old_radiator"],
-                index=["fan_coil","radiant_floor","old_radiator"].index(
-                    ss("terminal_type","fan_coil")),
-                format_func=lambda x: {
-                    "fan_coil":      "Fan coil units (40–45°C) ✓",
-                    "radiant_floor": "Underfloor heating (35°C) ✓",
-                    "old_radiator":  "Old radiators (70°C) ⚠️",
-                }[x])
-            sset(terminal_type=terminal)
+            st.caption("Total amount paid (all-in).")
+            gb1, gb2 = st.columns(2)
+            with gb1:
+                gas_bill_annual = st.number_input(
+                    "Total annual gas cost [€/year]",
+                    value=float(ss("gas_bill_annual", 0)),
+                    min_value=0.0, step=20.0, format="%.0f",
+                )
+            with gb2:
+                gas_bill_monthly = st.number_input(
+                    "Average monthly gas cost [€/month]",
+                    value=float(ss("gas_bill_monthly", 0)),
+                    min_value=0.0, step=10.0, format="%.0f",
+                )
+            if gas_bill_annual > 0:
+                _gas_cost = gas_bill_annual
+            elif gas_bill_monthly > 0:
+                _gas_cost = gas_bill_monthly * 12
+            else:
+                _gas_cost = 0.0
+            sset(gas_bill_annual=gas_bill_annual,
+                 gas_bill_monthly=gas_bill_monthly)
+
+        else:
+            st.caption("Annual gas consumption and cost.")
+            ga1, ga2 = st.columns(2)
+            with ga1:
+                total_gas = st.number_input(
+                    "Annual consumption [Sm³/year]",
+                    value=int(ss("annual_gas_sm3",
+                                  sum(ss("monthly_gas",[0]*12)))),
+                    min_value=0, step=50,
+                )
+            with ga2:
+                gas_bill_annual_only = st.number_input(
+                    "Annual gas cost [€/year]",
+                    value=float(ss("gas_bill_annual", 0)),
+                    min_value=0.0, step=50.0, format="%.0f",
+                )
+            _gas_cost = gas_bill_annual_only
+            gas_vals  = [total_gas / 12] * 12
+            sset(monthly_gas=gas_vals, annual_gas_sm3=total_gas,
+                 gas_bill_annual=gas_bill_annual_only)
+
+        # Derive gas unit price
+        if _gas_cost > 0 and total_gas > 0:
+            _gas_price = _gas_cost / total_gas
+        else:
+            _gas_price = 0.95   # fallback
+        sset(gas_price=_gas_price)
+
+        # Summary
+        gs1, gs2, gs3 = st.columns(3)
+        gs1.metric("Annual consumption", f"{total_gas:,.0f} Sm³")
+        gs2.metric("Annual cost",
+                   f"€ {_gas_cost:,.0f}" if _gas_cost > 0 else "not entered")
+        gs3.metric("Implied unit price",
+                   f"{_gas_price:.3f} €/Sm³" if _gas_cost > 0 else "default 0.95 €/Sm³")
+
+        # Heating terminals
+        terminal = st.selectbox(
+            "Heating distribution system",
+            ["fan_coil", "radiant_floor", "old_radiator"],
+            index=["fan_coil","radiant_floor","old_radiator"].index(
+                ss("terminal_type","fan_coil")),
+            format_func=lambda x: {
+                "fan_coil":      "Fan coil units (supply 40–45°C)",
+                "radiant_floor": "Underfloor heating (supply 35°C)",
+                "old_radiator":  "Traditional radiators (supply 70°C) — not ideal for heat pump",
+            }[x],
+        )
+        sset(terminal_type=terminal)
         if terminal == "old_radiator":
             st.markdown(
-                '<div class="warn">⚠️ With old radiators at 70–80°C the heat pump SCOP drops to ~2.0. '
-                'Consider replacing the terminals before installing a heat pump.</div>',
+                '<div class="warn">With traditional radiators at 70–80°C the heat pump '
+                'seasonal COP drops to approximately 2.0, significantly reducing savings. '
+                'Consider replacing with fan coil or underfloor before installing a heat pump.</div>',
                 unsafe_allow_html=True)
 
     st.divider()
@@ -628,9 +781,6 @@ def step_bollette():
             go_to(4)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 4 — SYSTEM (auto-sizing)
-# ══════════════════════════════════════════════════════════════════════════════
 
 def _run_sim(kwp, label):
     """Run one simulation and return KPI dict. Returns None on error."""
@@ -728,12 +878,11 @@ def _run_sim(kwp, label):
 
 
 def step_impianto():
-    st.markdown("### Your solar PV system")
-    st.caption("The engine automatically calculates optimal system sizes "
-               "based on your roof area and consumption. Pick your preferred scenario.")
+    st.markdown("### System sizing")
+    st.caption("Based on your roof area and consumption, we calculate three system sizes. Choose the one that fits your goals.")
 
     # Advanced roof parameters
-    with st.expander("⚙️ Roof parameters (auto-estimated — adjust if needed)",
+    with st.expander("Roof parameters — auto-estimated, adjust if needed",
                      expanded=False):
         tc1, tc2, tc3 = st.columns(3)
         with tc1:
@@ -751,7 +900,7 @@ def step_impianto():
                        "ground_fixed","bipv"].index(
                     ss("mounting","flat_roof_ballast")),
                 format_func=lambda x: {
-                    "flat_roof_ballast":"Flat roof (ballast)","roof_integrated":"Pitched roof",
+                    "flat_roof_ballast":"Flat roof","roof_integrated":"Pitched roof",
                     "ground_fixed":"Ground-mounted","bipv":"BIPV (facade)"}[x])
             sset(mounting=mounting)
 
@@ -806,7 +955,7 @@ def step_impianto():
         with col:
             best    = (i == 1)
             pay_str = f"{sc['payback']:.1f}" if sc['payback']<99 else ">25"
-            badge   = '<div class="badge">★ Recommended</div><br>' if best else ""
+            badge   = '<div class="badge">Recommended</div><br>' if best else ""
             card_cls = "sc-card sc-best" if best else "sc-card"
             sel_mark = "✅ " if i==sel else ""
             st.markdown(
@@ -823,7 +972,7 @@ def step_impianto():
                 f'{kpi_md("Payback", pay_str, "yr")}'
                 f'{kpi_md("IRR", str(round(sc["irr"],1)), "%", "blue")}'
                 f'</div>', unsafe_allow_html=True)
-            if st.button("Select →", key=f"sc_{i}",
+            if st.button("Select", key=f"sc_{i}",
                          type="primary" if i==sel else "secondary",
                          use_container_width=True):
                 sset(selected_scenario=i)
@@ -1078,7 +1227,7 @@ def step_risultati():
     with nav1:
         if st.button("← Edit system", use_container_width=True): go_to(4)
     with nav2:
-        if st.button("🔄 New analysis", use_container_width=True):
+        if st.button("New analysis", use_container_width=True):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
@@ -1092,10 +1241,8 @@ if "step" not in st.session_state:
     st.session_state["step"] = 1
 
 st.markdown(
-    '<h1 style="font-size:22px;font-weight:700;color:#111827;margin-bottom:.15rem">'
-    '☀️ PV Engine</h1>'
-    '<p style="font-size:13px;color:#6b7280;margin-bottom:1.25rem">'
-    'Solar PV feasibility analysis</p>',
+    '<div class="pv-header-title">Solar PV Analysis</div>'
+    '<div class="pv-header-name">PV Engine</div>',
     unsafe_allow_html=True)
 
 render_progress(st.session_state["step"])

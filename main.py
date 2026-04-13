@@ -612,11 +612,15 @@ def run_simulation(inp: SimulationInput) -> SimulationResult:
     # Scale down demand in those hours (not to zero — HVAC frost protection,
     # fridge, standby loads remain) to 10% of normal.
     if _hour_st > 0:
+        # Standby fraction when unoccupied:
+        #   Residential: ~25% (fridge always-on, router, standby, water heater)
+        #   Commercial/industrial: ~10% (HVAC frost, security, servers)
+        _standby = 0.25 if bld.building_type == "residential" else 0.10
         masked = list(loads_result.hourly_demand_Wh)
         for i in range(len(masked)):
             h = i % 24
             if h < _hour_st:
-                masked[i] *= 0.10   # 10% standby load when unoccupied
+                masked[i] *= _standby   # standby load when unoccupied
         from dataclasses import replace as _dc_replace
         # Recompute annual total after masking
         new_total = sum(masked) / 1000.0

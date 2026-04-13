@@ -31,12 +31,15 @@ except ImportError:
     _USE_REQUESTS = False
 
 
-# ── Nominatim settings ───────────────────────────────────────────────────────
+# ── Geocoding settings ───────────────────────────────────────────────────────
+# Primary: Photon (komoot) — no API key, higher rate limits, OSM data
+# Fallback: Nominatim — stricter limits (1 req/s), may 429 on shared IPs
+_PHOTON_URL      = "https://photon.komoot.io/api/"
 _NOMINATIM_URL   = "https://nominatim.openstreetmap.org/search"
-_USER_AGENT      = "PVEngine/1.0 (analisi-fotovoltaica)"
+_USER_AGENT      = "PVEngine/1.0 (solar-pv-analysis)"
 _TIMEOUT_S       = 10
-_LAST_REQUEST_TS = 0.0          # timestamp dell'ultima richiesta (rate limiting)
-_MIN_INTERVAL_S  = 1.1          # Nominatim policy: max 1 req/s
+_LAST_REQUEST_TS = 0.0
+_MIN_INTERVAL_S  = 0.5   # Photon is more lenient
 
 
 @dataclass
@@ -59,27 +62,10 @@ def geocode(
     limit: int = 5,
 ) -> list[GeoResult]:
     """
-    Cerca un indirizzo tramite Nominatim e restituisce fino a `limit` risultati.
+    Geocodes an address using Photon (primary) with Nominatim as fallback.
+    Returns up to `limit` results ordered by relevance. Empty list if none found.
 
-    Parameters
-    ----------
-    address : str
-        Indirizzo in forma libera (es. "Via Roma 14, Milano").
-    country_codes : str
-        Codici paese ISO 3166-1 alpha-2 separati da virgola per restringere
-        la ricerca (es. "it" per solo Italia).  Passa "" per nessun filtro.
-    limit : int
-        Numero massimo di risultati (1–10).
-
-    Returns
-    -------
-    list[GeoResult]
-        Lista ordinata per rilevanza decrescente.  Vuota se nessun risultato.
-
-    Raises
-    ------
-    GeocodingError
-        Se la richiesta HTTP fallisce o la risposta non è JSON valido.
+    Raises GeocodingError on network failure.
     """
     global _LAST_REQUEST_TS
 
@@ -90,50 +76,75 @@ def geocode(
     elapsed = time.time() - _LAST_REQUEST_TS
     if elapsed < _MIN_INTERVAL_S:
         time.sleep(_MIN_INTERVAL_S - elapsed)
+    _LAST_REQUEST_TS = time.time()
 
-    # ── Build URL ────────────────────────────────────────────────────────────
+    # ── Try Photon first ─────────────────────────────────────────────────────
+    try:
+        return _geocode_photon(address, country_codes, limit)
+    except GeocodingError:
+        pass   # fall through to Nominatim
+
+    # ── Fallback: Nominatim ──────────────────────────────────────────────────
+    return _geocode_nominatim(address, country_codes, limit)
+
+
+def _geocode_photon(address: str, country_codes: str, limit: int) -> list[GeoResult]:
+    """Geocode via Photon (komoot). Returns list[GeoResult]."""
+    # Photon does not support country_codes filter natively;
+    # we append the country hint to the query string instead.
+    query = address.strip()
+    if country_codes == "it":
+        query = query  # Photon uses lang param, not country filter
+
+    params = urllib.parse.urlencode({
+        "q":     query,
+        "limit": str(max(1, min(limit, 10))),
+        "lang":  "en",
+    })
+    url = f"{_PHOTON_URL}?{params}"
+
+    raw = _http_get(url)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise GeocodingError(f"Invalid Photon response: {e}") from e
+
+    results: list[GeoResult] = []
+    for feat in data.get("features", []):
+        try:
+            lon, lat = feat["geometry"]["coordinates"]
+            props    = feat.get("properties", {})
+            parts    = [props.get(k,"") for k in
+                        ("name","street","housenumber","city","state","country")
+                        if props.get(k)]
+            display  = ", ".join(p for p in parts if p)
+            results.append(GeoResult(
+                lat          = float(lat),
+                lon          = float(lon),
+                display_name = display or query,
+                place_id     = hash(f"{lat},{lon}") & 0xFFFFFF,
+                importance   = 0.5,
+            ))
+        except (KeyError, ValueError, TypeError):
+            continue
+
+    return results
+
+
+def _geocode_nominatim(address: str, country_codes: str, limit: int) -> list[GeoResult]:
+    """Geocode via Nominatim. Raises GeocodingError on failure."""
     params: dict[str, str] = {
-        "q":             address.strip(),
-        "format":        "json",
-        "limit":         str(max(1, min(limit, 10))),
-        "addressdetails":"1",
+        "q":              address.strip(),
+        "format":         "json",
+        "limit":          str(max(1, min(limit, 10))),
+        "addressdetails": "1",
     }
     if country_codes:
         params["countrycodes"] = country_codes
 
     url = f"{_NOMINATIM_URL}?{urllib.parse.urlencode(params)}"
-    # ── HTTP request ─────────────────────────────────────────────────────────
-    try:
-        _LAST_REQUEST_TS = time.time()
-        if _USE_REQUESTS:
-            resp = _requests.get(
-                url, headers={"User-Agent": _USER_AGENT, "Accept-Language": "it,en"},
-                timeout=_TIMEOUT_S,
-            )
-            resp.raise_for_status()
-            raw = resp.text
-        else:
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": _USER_AGENT, "Accept-Language": "it,en"},
-            )
-            with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as r:
-                raw = r.read().decode("utf-8")
-    except Exception as e:
-        name = type(e).__name__
-        msg  = str(e)
-        if "SSL" in msg or "certificate" in msg.lower():
-            raise GeocodingError(
-                f"SSL error ({name}). On macOS: open Terminal and run "
-                f"'/Applications/Python 3.x/Install Certificates.command' "
-                f"(replace 3.x with your Python version)."
-            ) from e
-        raise GeocodingError(
-            f"Cannot reach Nominatim: {msg}. "
-            f"Check your internet connection."
-        ) from e
+    raw = _http_get(url, extra_headers={"Accept-Language": "it,en"})
 
-    # ── Parse response ───────────────────────────────────────────────────────
     try:
         data: list[dict] = json.loads(raw)
     except json.JSONDecodeError as e:
@@ -150,9 +161,45 @@ def geocode(
                 importance   = float(item.get("importance", 0.0)),
             ))
         except (KeyError, ValueError):
-            continue   # skip malformed entries silently
+            continue
 
     return results
+
+
+def _http_get(url: str, extra_headers: dict | None = None) -> str:
+    """Performs a GET request, returns response text. Raises GeocodingError."""
+    headers = {"User-Agent": _USER_AGENT}
+    if extra_headers:
+        headers.update(extra_headers)
+
+    try:
+        if _USE_REQUESTS:
+            resp = _requests.get(url, headers=headers, timeout=_TIMEOUT_S)
+            resp.raise_for_status()
+            return resp.text
+        else:
+            import urllib.request as _ur
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as r:
+                return r.read().decode("utf-8")
+    except Exception as e:
+        msg  = str(e)
+        name = type(e).__name__
+        if "SSL" in msg or "certificate" in msg.lower():
+            raise GeocodingError(
+                f"SSL error ({name}). On macOS: run "
+                f"'/Applications/Python 3.x/Install Certificates.command'."
+            ) from e
+        if "429" in msg or "Too Many" in msg:
+            raise GeocodingError(
+                f"Rate limit reached (429). The geocoding service is temporarily "
+                f"unavailable. Please wait a few seconds and try again."
+            ) from e
+        raise GeocodingError(
+            f"Cannot reach geocoding service: {msg}. "
+            f"Check your internet connection."
+        ) from e
+
 
 
 def calc_bearing(

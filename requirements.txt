@@ -1,0 +1,25 @@
+# PV Engine — dipendenze di produzione
+# Installazione: pip install -r requirements.txt
+
+# API layer
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.0.0
+python-multipart>=0.0.9      # upload file TMY (POST /tmy/upload)
+
+# Frontend Streamlit
+streamlit>=1.32.0
+plotly>=5.18.0
+pandas>=2.0.0
+
+# Mappa interattiva con click per azimuth
+folium>=0.15.0
+streamlit-folium>=0.18.0
+
+# Geocoding (usa solo stdlib urllib — nessuna dipendenza aggiuntiva)
+# requests già disponibile nella maggior parte degli ambienti
+
+# Solar engine (opzionale — calcolo solare più preciso)
+pvlib>=0.10.0
+
+# Note: il motore di calcolo usa solo libreria standard Python

@@ -88,17 +88,27 @@ def geocode(
     return _geocode_nominatim(address, country_codes, limit)
 
 
+_IT_LAT_MIN = 35.0
+_IT_LAT_MAX = 48.0
+_IT_LON_MIN =  6.0
+_IT_LON_MAX = 19.0
+
+
+def _in_italy(lat: float, lon: float) -> bool:
+    return _IT_LAT_MIN <= lat <= _IT_LAT_MAX and _IT_LON_MIN <= lon <= _IT_LON_MAX
+
+
 def _geocode_photon(address: str, country_codes: str, limit: int) -> list[GeoResult]:
-    """Geocode via Photon (komoot). Returns list[GeoResult]."""
-    # Photon does not support country_codes filter natively;
-    # we append the country hint to the query string instead.
+    """Geocode via Photon (komoot). Returns list[GeoResult].
+
+    Filters results to the Italian bounding box when country_codes=='it'.
+    If the filter leaves no results, falls back to Nominatim with country_codes='it'.
+    """
     query = address.strip()
-    if country_codes == "it":
-        query = query  # Photon uses lang param, not country filter
 
     params = urllib.parse.urlencode({
         "q":     query,
-        "limit": str(max(1, min(limit, 10))),
+        "limit": str(max(1, min(limit * 3, 30))),  # fetch extra to survive bbox filter
         "lang":  "en",
     })
     url = f"{_PHOTON_URL}?{params}"
@@ -113,20 +123,33 @@ def _geocode_photon(address: str, country_codes: str, limit: int) -> list[GeoRes
     for feat in data.get("features", []):
         try:
             lon, lat = feat["geometry"]["coordinates"]
-            props    = feat.get("properties", {})
-            parts    = [props.get(k,"") for k in
-                        ("name","street","housenumber","city","state","country")
-                        if props.get(k)]
-            display  = ", ".join(p for p in parts if p)
+            lat, lon = float(lat), float(lon)
+
+            # Bounding-box filter for Italy
+            if country_codes == "it" and not _in_italy(lat, lon):
+                continue
+
+            props   = feat.get("properties", {})
+            parts   = [props.get(k, "") for k in
+                       ("name", "street", "housenumber", "city", "state", "country")
+                       if props.get(k)]
+            display = ", ".join(p for p in parts if p)
             results.append(GeoResult(
-                lat          = float(lat),
-                lon          = float(lon),
+                lat          = lat,
+                lon          = lon,
                 display_name = display or query,
                 place_id     = hash(f"{lat},{lon}") & 0xFFFFFF,
                 importance   = 0.5,
             ))
         except (KeyError, ValueError, TypeError):
             continue
+
+        if len(results) >= limit:
+            break
+
+    # If bbox filter removed everything, retry with Nominatim (enforces country)
+    if not results and country_codes == "it":
+        return _geocode_nominatim(address, country_codes, limit)
 
     return results
 

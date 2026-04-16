@@ -1210,7 +1210,7 @@ def _build_metrics_text(result_dict: dict, scenarios: list,
 
 def generate_narrative(result_dict: dict, scenarios: list,
                        selected_scenario_idx: int) -> str | None:
-    """Call Claude API to generate a 5–7 sentence investment assessment.
+    """Call Claude API to generate a 3-sentence investment assessment.
     Returns the text, or None if the API key is missing or the call fails."""
     api_key = _get_api_key()
     if not api_key:
@@ -1220,15 +1220,11 @@ def generate_narrative(result_dict: dict, scenarios: list,
         metrics = _build_metrics_text(result_dict, scenarios,
                                       selected_scenario_idx)
         user_prompt = (
-            "Write a 5–7 sentence investment assessment for the following "
-            "residential PV simulation. Cite specific numbers throughout.\n\n"
+            "Write exactly 3 sentences for the following residential PV simulation:\n\n"
             f"{metrics}\n\n"
-            "Assess whether this is a good investment and explain concisely why "
-            "or why not. Mention the self-consumption rate and what drives it. "
-            "If NPV is positive, quantify the total benefit over 25 years. "
-            "If payback > 12 years or score < 4, explain what the main limiting "
-            "factor is and what would improve the economics (e.g. higher "
-            "consumption, battery, different occupancy, heat pump)."
+            "Sentence 1: whether it is a good investment and why. "
+            "Sentence 2: quantify the key numbers (annual saving, payback period, NPV). "
+            "Sentence 3: the main limiting factor or what would improve the economics."
         )
         client = anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(

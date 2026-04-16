@@ -1210,26 +1210,47 @@ def _build_metrics_text(result_dict: dict, scenarios: list,
 
 def generate_narrative(result_dict: dict, scenarios: list,
                        selected_scenario_idx: int) -> str | None:
-    """Call Claude API to generate a 3-sentence investment assessment.
+    """Call Claude API to generate a 2-sentence investment assessment.
     Returns the text, or None if the API key is missing or the call fails."""
     api_key = _get_api_key()
     if not api_key:
         return None
     try:
         import anthropic
-        metrics = _build_metrics_text(result_dict, scenarios,
-                                      selected_scenario_idx)
+        eco = result_dict["economics"]
+        eb  = result_dict["energy_balance_year1"]
+        pv  = result_dict["pv_performance"]
+        sc  = result_dict.get("scenario_comparison")
+
+        kwp = (scenarios[selected_scenario_idx]["kwp"]
+               if scenarios and selected_scenario_idx < len(scenarios)
+               and scenarios[selected_scenario_idx]
+               else pv.get("peak_power_kWp", 0))
+
+        if sc:
+            gas_price = ss("gas_price", 0.95)
+            bep       = sc.get("gas_breakeven_price_eur_sm3", 0)
+            gas_line  = f"HP break-even {bep:.2f} vs current {gas_price:.2f} €/Sm³."
+        else:
+            gas_line = ""
+
         user_prompt = (
-            "Write exactly 3 sentences for the following residential PV simulation:\n\n"
-            f"{metrics}\n\n"
-            "Sentence 1: whether it is a good investment and why. "
-            "Sentence 2: quantify the key numbers (annual saving, payback period, NPV). "
-            "Sentence 3: the main limiting factor or what would improve the economics."
+            "Write exactly 2 sentences about this residential PV simulation. "
+            "First sentence: state clearly if it is a good investment or not, "
+            "citing NPV and payback. Second sentence: name the single most "
+            "important factor limiting or driving the result.\n\n"
+            f"Data: {kwp:.1f} kWp, NPV €{eco['npv_eur']:,.0f}, "
+            f"IRR {eco['irr_pct']:.1f}%, "
+            f"payback {eco['payback_simple_yr']:.1f} yr, "
+            f"SCR {eb['self_consumption_rate']*100:.1f}%, "
+            f"saving €{eb['annual_saving_eur']:,.0f}/yr, "
+            f"score {eco['score']:.1f}/10."
+            + (f"\n{gas_line}" if gas_line else "")
         )
         client = anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=400,
+            max_tokens=120,
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -1377,8 +1398,9 @@ def step_risultati():
         fig.update_yaxes(gridcolor="#f3f4f6")
         st.plotly_chart(fig, use_container_width=True)
         cap = (captions or {}).get("cashflow")
-        if cap:
-            st.caption(cap)
+        if cap and cap != "N/A":
+            st.markdown(f'<p style="font-size:13px;color:#888;margin-top:4px">{cap}</p>',
+                        unsafe_allow_html=True)
 
         if scenarios and all(s is not None for s in scenarios):
             st.markdown("##### Comparison of three system sizes")
@@ -1424,8 +1446,9 @@ def step_risultati():
             fig2.update_yaxes(gridcolor="#f3f4f6")
             st.plotly_chart(fig2, use_container_width=True)
             cap = (captions or {}).get("production")
-            if cap:
-                st.caption(cap)
+            if cap and cap != "N/A":
+                st.markdown(f'<p style="font-size:13px;color:#888;margin-top:4px">{cap}</p>',
+                            unsafe_allow_html=True)
 
         ghi_m = loc.get("monthly_ghi_kWh_m2",[])
         if len(ghi_m)==12:
@@ -1475,8 +1498,9 @@ def step_risultati():
                             margin=dict(t=10,b=10,l=0,r=0), height=280)
         st.plotly_chart(fig_s, use_container_width=True)
         cap = (captions or {}).get("energy_balance")
-        if cap:
-            st.caption(cap)
+        if cap and cap != "N/A":
+            st.markdown(f'<p style="font-size:13px;color:#888;margin-top:4px">{cap}</p>',
+                        unsafe_allow_html=True)
 
     # ── Gas/HP ──────────────────────────────────────────────────────────────────
     with t_hp:
@@ -1517,7 +1541,8 @@ def step_risultati():
                          hide_index=True)
             cap = (captions or {}).get("gas_hp")
             if cap and cap != "N/A":
-                st.caption(cap)
+                st.markdown(f'<p style="font-size:13px;color:#888;margin-top:4px">{cap}</p>',
+                            unsafe_allow_html=True)
 
     # ── Raw data ──────────────────────────────────────────────────────────────────
     with t_raw:

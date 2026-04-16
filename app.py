@@ -9,7 +9,7 @@ Dependencies:
 """
 
 from __future__ import annotations
-import sys, json, math, traceback
+import os, sys, json, math, traceback
 from pathlib import Path
 import streamlit as st
 import pandas as pd
@@ -580,7 +580,7 @@ def step_edificio():
                     index=list(occ_opts.keys()).index(prev_key),
                     label_visibility="collapsed")
     occ_days, occ_hour, occ_hint = occ_opts[olbl]
-    sset(occ_days=occ_days, occ_hour=occ_hour)
+    sset(occ_days=occ_days, occ_hour=occ_hour, occ_label=olbl)
 
     st.caption(occ_hint)
 
@@ -1116,6 +1116,180 @@ def step_impianto():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CLAUDE API — NARRATIVE AND CHART CAPTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _get_api_key() -> str | None:
+    """Returns the Anthropic API key from st.secrets or environment."""
+    try:
+        key = st.secrets.get("ANTHROPIC_API_KEY")
+        if key:
+            return key
+    except Exception:
+        pass
+    return os.environ.get("ANTHROPIC_API_KEY")
+
+
+_SYSTEM_PROMPT = (
+    "You are an expert solar PV analyst writing concise, honest, "
+    "and jargon-free investment assessments for residential clients "
+    "in Italy. Be direct and specific — always cite actual numbers. "
+    "Never be generically optimistic. If the investment is marginal "
+    "or poor, say so clearly and explain why, then suggest what "
+    "would improve it. Write in English. Use plain paragraphs, "
+    "no bullet points, no headers."
+)
+
+
+def _build_metrics_text(result_dict: dict, scenarios: list,
+                        sel_idx: int) -> str:
+    """Shared metrics block used by both narrative functions."""
+    eco = result_dict["economics"]
+    eb  = result_dict["energy_balance_year1"]
+    pv  = result_dict["pv_performance"]
+    loc = result_dict["location"]
+    dem = result_dict.get("demand", {})
+    sc  = result_dict.get("scenario_comparison")
+
+    building_subtype = ss("building_subtype", "apartment")
+    occ_label        = ss("occ_label", "")
+    n_occupants      = ss("n_occupants", 2)
+    occ_hour         = ss("occ_hour", 0)
+
+    kwp = (scenarios[sel_idx]["kwp"]
+           if scenarios and sel_idx < len(scenarios) and scenarios[sel_idx]
+           else pv.get("peak_power_kWp", 0))
+
+    ann_demand = (dem.get("annual_demand_kWh")
+                  or dem.get("total_annual_kWh")
+                  or sum(ss("monthly_el", [0] * 12)))
+
+    pay     = eco["payback_simple_yr"]
+    pay_str = f"{pay:.1f}" if pay < 99 else ">25"
+
+    lines = [
+        f"Building: {building_subtype}, {n_occupants} residents, "
+        f"occupancy: {occ_label}",
+        f"Location: {loc.get('latitude', 0):.3f}°N, "
+        f"GHI {loc.get('annual_ghi_kWh_m2', 0):.0f} kWh/m²/yr",
+        f"System: {kwp:.1f} kWp, "
+        f"{pv['specific_yield_kWh_kWp']:.0f} kWh/kWp/yr",
+        f"Annual production: {pv['production_annual_kWh']:,.0f} kWh",
+        f"Annual demand: {ann_demand:,.0f} kWh",
+        f"Self-consumption rate: {eb['self_consumption_rate']*100:.1f}%",
+        f"Self-sufficiency rate: {eb['self_sufficiency_rate']*100:.1f}%",
+        f"Annual saving year 1: €{eb['annual_saving_eur']:,.0f}",
+        f"Total investment (gross): €{eco['total_capex_eur']:,.0f}",
+        f"Net investment after 50% IRPEF deduction (present value): "
+        f"€{eco['net_capex_eur']:,.0f}",
+        f"NPV (25 years, 5% discount): €{eco['npv_eur']:,.0f}",
+        f"IRR: {eco['irr_pct']:.1f}%",
+        f"Simple payback: {pay_str} years",
+        f"Score: {eco['score']:.1f}/10",
+    ]
+
+    if sc:
+        total_gas = sum(ss("monthly_gas", [0] * 12))
+        gas_price = ss("gas_price", 0.95)
+        bep       = sc.get("gas_breakeven_price_eur_sm3", 0)
+        rec       = sc.get("recommended_scenario", "solo_pv")
+        lines += [
+            f"Gas system: {total_gas:.0f} Sm³/yr at €{gas_price:.2f}/Sm³",
+            f"Heat pump break-even gas price: €{bep:.2f}/Sm³",
+            f"HP recommendation: {rec}",
+        ]
+
+    if occ_hour > 10:
+        lines.append(
+            f"Note: occupant is away from home until {occ_hour}:00 on weekdays, "
+            f"reducing daytime self-consumption."
+        )
+
+    return "\n".join(lines)
+
+
+def generate_narrative(result_dict: dict, scenarios: list,
+                       selected_scenario_idx: int) -> str | None:
+    """Call Claude API to generate a 5–7 sentence investment assessment.
+    Returns the text, or None if the API key is missing or the call fails."""
+    api_key = _get_api_key()
+    if not api_key:
+        return None
+    try:
+        import anthropic
+        metrics = _build_metrics_text(result_dict, scenarios,
+                                      selected_scenario_idx)
+        user_prompt = (
+            "Write a 5–7 sentence investment assessment for the following "
+            "residential PV simulation. Cite specific numbers throughout.\n\n"
+            f"{metrics}\n\n"
+            "Assess whether this is a good investment and explain concisely why "
+            "or why not. Mention the self-consumption rate and what drives it. "
+            "If NPV is positive, quantify the total benefit over 25 years. "
+            "If payback > 12 years or score < 4, explain what the main limiting "
+            "factor is and what would improve the economics (e.g. higher "
+            "consumption, battery, different occupancy, heat pump)."
+        )
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=400,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        return msg.content[0].text
+    except Exception:
+        return None
+
+
+def generate_chart_captions(result_dict: dict) -> dict:
+    """Call Claude API once to get 4 chart captions returned as a JSON dict.
+    Keys: production, cashflow, energy_balance, gas_hp.
+    Returns an empty dict if the call fails or the API key is missing."""
+    api_key = _get_api_key()
+    if not api_key:
+        return {}
+    try:
+        import anthropic
+        metrics = _build_metrics_text(
+            result_dict,
+            ss("scenarios", []),
+            ss("selected_scenario", 1),
+        )
+        user_prompt = (
+            "For a residential PV simulation with these results:\n"
+            f"{metrics}\n\n"
+            "Write exactly 4 short captions (2–3 sentences each), "
+            "returned as a JSON object with these keys:\n"
+            "- production: caption for monthly production bar chart\n"
+            "- cashflow: caption for 25-year cumulative cash flow chart\n"
+            "- energy_balance: caption for energy flow (Sankey diagram)\n"
+            "- gas_hp: caption for gas/HP scenario comparison "
+            "(write \"N/A\" if no gas system)\n\n"
+            "Be specific to these numbers. Explain what the chart shows "
+            "and what it means for this specific case. "
+            "Return only the JSON object, no other text."
+        )
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=400,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        text = msg.content[0].text.strip()
+        # Strip markdown code fence if present
+        if text.startswith("```"):
+            text = text.split("```", 2)[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+        return json.loads(text)
+    except Exception:
+        return {}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # STEP 5 — RISULTATI
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1142,6 +1316,18 @@ def step_risultati():
     score     = eco["score"]
     sc_color  = "#15803d" if score>=7 else ("#d97706" if score>=5 else "#dc2626")
 
+    # ── Generate/cache Claude narrative ──────────────────────────────────────
+    result_hash = f"{eco['npv_eur']:.0f}_{eco['irr_pct']:.2f}"
+    if ss("narrative_hash") != result_hash:
+        with st.spinner("Generating analysis…"):
+            narrative = generate_narrative(d, scenarios, sel)
+            captions  = generate_chart_captions(d)
+            sset(narrative=narrative, captions=captions,
+                 narrative_hash=result_hash)
+    else:
+        narrative = ss("narrative")
+        captions  = ss("captions") or {}
+
     st.markdown(
         f'<div style="background:#f0fdf4;border-radius:12px;'
         f'padding:1.25rem 1.5rem;border:1px solid #bbf7d0;margin-bottom:1.5rem">'
@@ -1152,6 +1338,15 @@ def step_risultati():
         f'NPV {fmt_eur(eco["npv_eur"])} · IRR {eco["irr_pct"]:.1f}% · '
         f'Payback {pay_str} yr</div></div>',
         unsafe_allow_html=True)
+
+    if narrative:
+        st.markdown(
+            f'<div style="background:#f8f8f8;border-left:3px solid #111;'
+            f'padding:1.25rem 1.5rem;margin-bottom:1.5rem;'
+            f'font-size:15px;line-height:1.8;color:#222;">'
+            f'{narrative}</div>',
+            unsafe_allow_html=True,
+        )
 
     t_eco, t_prod, t_eb, t_hp, t_raw = st.tabs([
         "💰 Economics","☀️ Production","⚡ Energy balance","🔥 Gas/HP","📊 Raw data",
@@ -1185,6 +1380,9 @@ def step_risultati():
                           margin=dict(t=15,b=40,l=70,r=20), height=300)
         fig.update_yaxes(gridcolor="#f3f4f6")
         st.plotly_chart(fig, use_container_width=True)
+        cap = (captions or {}).get("cashflow")
+        if cap:
+            st.caption(cap)
 
         if scenarios and all(s is not None for s in scenarios):
             st.markdown("##### Comparison of three system sizes")
@@ -1229,6 +1427,9 @@ def step_risultati():
                                margin=dict(t=10,b=40,l=60,r=20), height=260)
             fig2.update_yaxes(gridcolor="#f3f4f6")
             st.plotly_chart(fig2, use_container_width=True)
+            cap = (captions or {}).get("production")
+            if cap:
+                st.caption(cap)
 
         ghi_m = loc.get("monthly_ghi_kWh_m2",[])
         if len(ghi_m)==12:
@@ -1277,6 +1478,9 @@ def step_risultati():
         fig_s.update_layout(paper_bgcolor="white",
                             margin=dict(t=10,b=10,l=0,r=0), height=280)
         st.plotly_chart(fig_s, use_container_width=True)
+        cap = (captions or {}).get("energy_balance")
+        if cap:
+            st.caption(cap)
 
     # ── Gas/HP ──────────────────────────────────────────────────────────────────
     with t_hp:
@@ -1315,6 +1519,9 @@ def step_risultati():
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True,
                          hide_index=True)
+            cap = (captions or {}).get("gas_hp")
+            if cap and cap != "N/A":
+                st.caption(cap)
 
     # ── Raw data ──────────────────────────────────────────────────────────────────
     with t_raw:

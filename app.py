@@ -121,22 +121,17 @@ def kpi_md(label, val, unit="", cls=""):
             f' {unit}</span></div></div>')
 
 
-def estimate_pv_cost(kwp: float, btype: str = "warehouse") -> int:
+def estimate_pv_cost(kwp: float) -> int:
     """
-    All-in PV installation cost [€] — monotonic marginal-cost model.
+    All-in residential PV installation cost [€] — monotonic marginal-cost model.
     Calibrated on Italian market prices 2024. Accuracy: ±15%.
 
     Residential: 1,600–2,500 €/kWp all-in
-    Industrial/Commercial: 900–1,600 €/kWp all-in
     """
-    is_res = btype not in ("warehouse", "industrial", "office", "retail")
     TIERS_RES = [(3, 2100), (6, 1800), (20, 1500),
                  (50, 1250), (100, 1050), (250, 900), (float("inf"), 800)]
-    TIERS_IND = [(3, 1900), (6, 1650), (20, 1350),
-                 (50, 1100), (100, 920),  (250, 800), (float("inf"), 720)]
-    tiers = TIERS_RES if is_res else TIERS_IND
     cost, remaining, prev = 0.0, kwp, 0.0
-    for thresh, eur_kwp in tiers:
+    for thresh, eur_kwp in TIERS_RES:
         if remaining <= 0:
             break
         in_tier = min(remaining, thresh - prev)
@@ -451,19 +446,63 @@ def step_posizione():
 def step_edificio():
     st.markdown("### Building")
 
-    st.markdown('<div class="slbl">Building type</div>', unsafe_allow_html=True)
-    tipo_opts = {
-        "House / Apartment":              "residential",
-        "Warehouse / Factory":            "warehouse",
-        "Offices / Commercial":           "office",
-        "Industrial plant":               "industrial",
-        "Shop / Retail":                  "retail",
+    st.markdown('<div class="slbl">Residential building type</div>',
+                unsafe_allow_html=True)
+    subtype_opts = {
+        "Detached house":  "detached",
+        "Terraced house":  "terraced",
+        "Apartment":       "apartment",
     }
-    tlbl = st.radio("Type", list(tipo_opts.keys()),
-                    index=list(tipo_opts.values()).index(ss("building_type","warehouse")),
-                    label_visibility="collapsed", horizontal=True)
-    btype = tipo_opts[tlbl]
-    sset(building_type=btype)
+    prev_sub = ss("building_subtype", "detached")
+    sublbl = st.radio("Subtype", list(subtype_opts.keys()),
+                      index=list(subtype_opts.values()).index(prev_sub),
+                      label_visibility="collapsed", horizontal=True)
+    bsubtype = subtype_opts[sublbl]
+    sset(building_subtype=bsubtype, building_type="residential")
+
+    # Floor and attic — only for apartment / terraced
+    if bsubtype in ("apartment", "terraced"):
+        st.markdown('<div class="slbl">Floor</div>', unsafe_allow_html=True)
+        floor_opts = {
+            "Ground floor": 0,
+            "1st floor":    1,
+            "2nd floor":    2,
+            "3rd floor":    3,
+            "4th or higher": 4,
+        }
+        prev_floor = ss("floor_number", 0)
+        flbl = st.radio("Floor", list(floor_opts.keys()),
+                        index=list(floor_opts.values()).index(
+                            min(prev_floor, 4)),
+                        label_visibility="collapsed", horizontal=True)
+        floor_num = floor_opts[flbl]
+        is_top = st.checkbox("Top-floor unit or attic",
+                             value=bool(ss("is_top_floor", False)))
+        sset(floor_number=floor_num, is_top_floor=is_top)
+    else:
+        # Detached house: all surfaces exposed
+        sset(floor_number=0, is_top_floor=True)
+
+    st.divider()
+
+    st.markdown('<div class="slbl">Number of residents</div>',
+                unsafe_allow_html=True)
+    n_occ = st.number_input("Number of residents", min_value=1, max_value=10,
+                             value=int(ss("n_occupants", 2)),
+                             label_visibility="collapsed")
+    sset(n_occupants=int(n_occ))
+
+    st.divider()
+
+    # Air conditioning
+    has_ac = st.toggle("Air conditioning installed",
+                       value=bool(ss("has_ac", False)))
+    sset(has_ac=has_ac)
+    if has_ac:
+        ac_kw = st.slider("Estimated cooling capacity [kW]",
+                          min_value=1.5, max_value=12.0,
+                          value=float(ss("ac_kw", 3.5)), step=0.5)
+        sset(ac_kw=ac_kw)
 
     st.divider()
 
@@ -792,18 +831,49 @@ def _run_sim(kwp, label):
         _pvc.fetch_tmy = lambda lat=None, lon=None, use_cache=True: tmy
         _m.fetch_tmy   = lambda lat=None, lon=None, use_cache=True: tmy
 
-        btype   = ss("building_type","warehouse")
-        has_gas = ss("has_gas", False)
-        ann_el  = sum(ss("monthly_el",[0]*12))
-        gas_sm3 = sum(ss("monthly_gas",[0]*12))
-        capex   = estimate_pv_cost(kwp, btype)
+        has_gas    = ss("has_gas", False)
+        ann_el     = sum(ss("monthly_el",[0]*12))
+        total_gas  = sum(ss("monthly_gas",[0]*12))
+        capex      = estimate_pv_cost(kwp)
 
         inc = ItalianIncentives(
-            detrazione_fiscale_pct  = 50.0 if btype=="residential" else 0.0,
+            detrazione_fiscale_pct  = 50.0,
             detrazione_spread_years = 10,
-            ammortamento_accelerato = btype != "residential",
-            aliquota_ires_pct       = 24.0,
         )
+
+        # ── Thermal demand correction based on building subtype ───────────────
+        bsubtype   = ss("building_subtype", "detached")
+        floor_num  = ss("floor_number", 0)
+        is_top     = ss("is_top_floor", True)
+
+        if bsubtype == "detached":
+            thermal_factor = 1.0
+        elif bsubtype == "terraced":
+            if is_top:
+                thermal_factor = 0.85
+            elif floor_num == 0:
+                thermal_factor = 0.82
+            else:
+                thermal_factor = 0.78
+        else:  # apartment
+            if is_top:
+                thermal_factor = 0.70
+            elif floor_num == 0:
+                thermal_factor = 0.65
+            else:
+                thermal_factor = 0.55
+
+        adjusted_gas_sm3 = total_gas * thermal_factor
+
+        # ── AC load added to annual electricity demand ────────────────────────
+        has_ac = ss("has_ac", False)
+        ac_kw  = ss("ac_kw", 3.5)
+        if has_ac:
+            ac_hours_summer = ac_kw * 6 * 90  # 6 h/day × 90 summer days
+            ann_el_final = ann_el + ac_hours_summer
+        else:
+            ac_hours_summer = 0.0
+            ann_el_final = ann_el
 
         inp = SimulationInput(
             location  = LocationInput(
@@ -811,9 +881,10 @@ def _run_sim(kwp, label):
                 lon=ss("center_lon") or ss("geo_lon") or 10.0,
             ),
             building  = BuildingInput(
-                building_type           = btype,
+                building_type           = "residential",
                 floor_area_m2           = ss("floor_area", 200.0),
-                annual_demand_kWh       = float(ann_el),
+                annual_demand_kWh       = float(ann_el_final),
+                n_occupants             = int(ss("n_occupants", 2)),
                 occupancy_days_per_week = ss("occ_days", 7.0),
                 occupancy_hour_start    = ss("occ_hour", 0),
             ),
@@ -840,7 +911,7 @@ def _run_sim(kwp, label):
             incentives = inc,
             gas_system = GasSystemInput(
                 has_gas=has_gas,
-                annual_consumption_units=float(gas_sm3) if has_gas else 0.0,
+                annual_consumption_units=float(adjusted_gas_sm3) if has_gas else 0.0,
                 gas_price_eur_sm3=ss("gas_price",0.95) if has_gas else 0.0,
                 terminal_type=ss("terminal_type","fan_coil") if has_gas else "fan_coil",
                 boiler_efficiency=0.88, dhw_fraction=0.12,
@@ -912,7 +983,8 @@ def step_impianto():
     floor_area = ss("floor_area", 200.0)
     mounting   = ss("mounting","flat_roof_ballast")
     ann_el     = sum(ss("monthly_el",[0]*12))
-    btype      = ss("building_type","warehouse")
+    bsubtype   = ss("building_subtype", "detached")
+    is_top     = ss("is_top_floor", True)
 
     osm_area = None
     if buildings and c_lat:
@@ -922,18 +994,44 @@ def step_impianto():
             osm_area = polygon_area_m2(cl.coords)
     roof_area = osm_area if (osm_area and osm_area > 20) else floor_area
 
-    kwp_max_ = kwp_from_area(roof_area, mounting, share_pct)
+    # Building-subtype roof access adjustments
+    if bsubtype == "apartment" and not is_top:
+        # Mid-floor apartment: no roof access — use floor area with low utilisation
+        st.markdown(
+            '<div class="warn">Mid-floor apartments typically cannot install '
+            'rooftop PV. Check with your building administrator. '
+            'Estimates below assume BIPV or balcony installation (15% utilisation).</div>',
+            unsafe_allow_html=True)
+        effective_share = 15
+        effective_mounting = "bipv"
+    else:
+        effective_share    = share_pct
+        effective_mounting = mounting
+        # Top-floor apartment: default to roof_integrated
+        if bsubtype == "apartment" and is_top and mounting == "flat_roof_ballast":
+            effective_mounting = "roof_integrated"
+            sset(mounting="roof_integrated")
+
+    kwp_max_ = kwp_from_area(roof_area, effective_mounting, effective_share)
     kwp_min, kwp_opt, kwp_max = auto_scenarios(kwp_max_, ann_el)
 
     src = "OSM outline" if osm_area else "declared floor area"
     st.caption(
-        f"Roof ({src}): **{roof_area:.0f} m²** × {share_pct}% = "
-        f"**{roof_area*share_pct/100:.0f} m²** usable → "
+        f"Roof ({src}): **{roof_area:.0f} m²** × {effective_share}% = "
+        f"**{roof_area*effective_share/100:.0f} m²** usable → "
         f"maximum **{kwp_max:.1f} kWp** installable"
     )
 
     # Cache scenarios
-    cache_key = f"{kwp_min}_{kwp_opt}_{kwp_max}_{ann_el}_{share_pct}_{mounting}"
+    _n_occ  = ss("n_occupants", 2)
+    _has_ac = ss("has_ac", False)
+    _ac_kw  = ss("ac_kw", 3.5)
+    _subtype = bsubtype
+    _floor   = ss("floor_number", 0)
+    _top     = is_top
+    cache_key = (f"{kwp_min}_{kwp_opt}_{kwp_max}_{ann_el}_{effective_share}"
+                 f"_{effective_mounting}_{_n_occ}_{_has_ac}_{_ac_kw}"
+                 f"_{_subtype}_{_floor}_{_top}")
     if ss("scenarios_key") != cache_key:
         with st.spinner("Calculating scenarios… (~20–40 sec)"):
             s1 = _run_sim(kwp_min, "Minima")
@@ -978,17 +1076,33 @@ def step_impianto():
                 sset(selected_scenario=i)
                 st.rerun()
 
-    # Nota incentivi
+    # Nota incentivi e fattori fisici
     sc_sel = scenarios[sel]
     if sc_sel["incentive"] > 0:
-        inc_type = ("50% IRPEF tax deduction"
-                    if btype=="residential"
-                    else "Accelerated IRES depreciation (24%)")
         st.markdown(
-            f'<div class="good">💡 <strong>{inc_type} applied</strong> — '
+            f'<div class="good">💡 <strong>50% IRPEF tax deduction applied</strong> — '
             f'present value {fmt_eur(sc_sel["incentive"])} · '
             f'Net effective investment: <strong>{fmt_eur(sc_sel["net_capex"])}</strong>'
             f'</div>', unsafe_allow_html=True)
+
+    # Physical adjustment notes
+    bsubtype  = ss("building_subtype", "detached")
+    floor_num = ss("floor_number", 0)
+    is_top    = ss("is_top_floor", True)
+    if bsubtype == "detached":
+        tf = 1.0
+    elif bsubtype == "terraced":
+        tf = 0.85 if is_top else (0.82 if floor_num == 0 else 0.78)
+    else:
+        tf = 0.70 if is_top else (0.65 if floor_num == 0 else 0.55)
+    if tf < 1.0:
+        st.caption(f"Thermal demand adjusted for building type: ×{tf:.2f}")
+
+    has_ac = ss("has_ac", False)
+    if has_ac:
+        ac_kw = ss("ac_kw", 3.5)
+        ac_kwh = ac_kw * 6 * 90
+        st.caption(f"AC load added: +{ac_kwh:.0f} kWh/yr (summer peak hours)")
 
     st.divider()
     ca, cb = st.columns(2)

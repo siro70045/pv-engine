@@ -911,7 +911,77 @@ def step_system():
                                 int(ss("inv_repl_pct", 15)), 1)
             sset(inv_repl_pct=inv_pct)
 
-    # Auto-size from OSM / floor area
+    # ── Structural assessment ─────────────────────────────────────────────────
+    st.markdown('<div class="slbl">Roof structural assessment</div>',
+                unsafe_allow_html=True)
+
+    _cy = ss("construction_year", 1981)
+    if _cy >= 2010:
+        _default_structural = 2500
+    elif _cy >= 1990:
+        _default_structural = 5000
+    elif _cy >= 1973:
+        _default_structural = 12000
+    else:
+        _default_structural = 22000
+
+    structural_status = st.radio(
+        "Has a structural assessment been done?",
+        [
+            "Not yet assessed",
+            "Assessed — no reinforcement needed",
+            "Assessed — minor reinforcement needed",
+            "Assessed — major reinforcement needed",
+        ],
+        index=0,
+        label_visibility="visible",
+        key="structural_status_radio",
+    )
+
+    if structural_status == "Not yet assessed":
+        st.markdown(
+            f'<div style="background:#1a1a2e; border-left:2px solid #888; '
+            f'padding:0.8rem 1rem; font-size:13px; color:#ccc;">'
+            f'Based on the construction year ({_cy}), '
+            f'estimated structural costs are approximately '
+            f'<strong>€{_default_structural:,}</strong>. '
+            f'This includes the mandatory structural survey (€2,000–3,000) '
+            f'and any reinforcement work. Budget accordingly.'
+            f'</div>', unsafe_allow_html=True)
+        structural_cost = _default_structural
+
+    elif structural_status == "Assessed — no reinforcement needed":
+        structural_cost = st.number_input(
+            "Structural survey cost [€]",
+            value=2500, min_value=0, max_value=10000, step=500,
+        )
+
+    elif structural_status == "Assessed — minor reinforcement needed":
+        structural_cost = st.number_input(
+            "Total structural cost (survey + reinforcement) [€]",
+            value=8000, min_value=2000, max_value=30000, step=1000,
+        )
+
+    else:
+        structural_cost = st.number_input(
+            "Total structural cost (survey + reinforcement) [€]",
+            value=22000, min_value=5000, max_value=50000, step=1000,
+        )
+
+    sset(structural_cost=int(structural_cost))
+
+    if _cy < 1973:
+        st.markdown(
+            '<div style="background:#1a1a2e; border-left:2px solid #c0392b; '
+            'padding:0.8rem 1rem; font-size:13px; color:#e0a0a0;">'
+            '<strong>Pre-1973 building:</strong> structures built before the '
+            'first seismic code (1974) often require significant reinforcement '
+            'to support the additional roof load of PV panels (15–25 kg/m²). '
+            'Consider a ground-mounted system as an alternative if the '
+            'school has available land.'
+            '</div>', unsafe_allow_html=True)
+
+    # ── Auto-size from OSM / floor area
     buildings  = ss("buildings_cache") or []
     c_lat      = ss("center_lat")
     c_lon      = ss("center_lon")
@@ -1074,7 +1144,10 @@ def _run_sim_school(
             return None
 
         floor_area = ss("school_floor_area", 3000.0)
-        capex, structural = estimate_pv_cost_school(kwp)
+        capex, auto_structural = estimate_pv_cost_school(kwp)
+        # Replace auto structural estimate with user-provided value (fixed per building)
+        structural_cost = int(ss("structural_cost", int(auto_structural)))
+        capex = capex - int(auto_structural) + structural_cost
         is_public = ss("is_public", True)
 
         production_est = kwp * 1150.0   # rough estimate for incentive calc
@@ -1100,7 +1173,7 @@ def _run_sim_school(
             import_price              = ss("el_price", 0.22),
             export_price              = ss("export_price", 0.08),
             capex_eur                 = float(inc["capex_iva_corrected"]),
-            structural_eur            = float(structural),
+            structural_eur            = float(structural_cost),
             pnrr_grant                = float(inc["pnrr_grant"]),
             cer_incentive_eur_kwh     = cer_incentive if cer_fraction > 0 else 0.0,
             cer_fraction              = cer_fraction,
@@ -1320,6 +1393,13 @@ def step_results():
                        unsafe_allow_html=True)
         kc[3].markdown(kpi_md("LCOE",           f"{eco['lcoe_eur_kWh']:.4f}", "€/kWh"),
                        unsafe_allow_html=True)
+
+        _struct_cost = ss("structural_cost", 0)
+        if _struct_cost > 0:
+            st.caption(
+                f"Includes €{_struct_cost:,} for structural assessment"
+                f"{' and reinforcement' if _struct_cost > 5000 else ''}."
+            )
 
         if sc.get("cer_annual", 0) > 0:
             st.markdown(

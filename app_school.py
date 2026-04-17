@@ -1255,6 +1255,21 @@ def step_results():
         ]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+        if loads_r.get("internal_gains"):
+            ig = loads_r["internal_gains"]
+            n_occ = int(ss("n_students", 0) or 0) + int(ss("n_teachers", 0) or 0) + int(ss("n_ata_staff", 0) or 0)
+            reduct_str = (f" ({round(ig['reduction_pct'])}% of HP heating demand)"
+                          if ig.get("reduction_pct") else "")
+            st.markdown(
+                f'<div style="background:#0f2027; border-left:3px solid #16a34a; '
+                f'padding:0.8rem 1rem; margin:0.5rem 0; font-size:13px; color:#ccc;">'
+                f'<strong>Internal heat gains:</strong> {ig["peak_kW"]:.1f} kW peak '
+                f'from {n_occ} occupants. '
+                f'Annual offset: {ig["annual_kWh"]:,.0f} kWh{reduct_str}.'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
     st.divider()
 
     # ── Tabs ──────────────────────────────────────────────────────────────────

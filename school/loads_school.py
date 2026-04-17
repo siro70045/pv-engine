@@ -281,6 +281,41 @@ def _build_category_profiles(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# INTERNAL HEAT GAINS FROM OCCUPANTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _calc_internal_gains(inp: "SchoolLoadsInput") -> dict:
+    """
+    Calcola i guadagni termici interni dagli occupanti.
+
+    Metabolic heat rates (ASHRAE Fundamentals, Table 1 Ch.18):
+      seated student  70 W, light-activity adult  75 W, moderate adult  85 W.
+
+    Returns dict with hourly_gains_Wh, annual_gains_kWh, peak_gains_kW.
+    """
+    peak_W = (inp.n_students * 70
+              + inp.n_teachers * 75
+              + inp.n_ata_staff * 85)
+
+    cal = build_school_calendar(
+        inp.school_type, inp.extra_evening, inp.extra_weekend, inp.full_time
+    )
+    # Count gains only on actual school days — students/teachers are not
+    # present during guardiania (0.02) or summer ATA shifts (0.05).
+    hourly_gains_Wh = [
+        peak_W * frac if _is_school_day(h // 24, inp.school_type) else 0.0
+        for h, frac in enumerate(cal)
+    ]
+    annual_gains_kWh = sum(hourly_gains_Wh) / 1000.0
+
+    return {
+        "hourly_gains_Wh":  hourly_gains_Wh,
+        "annual_gains_kWh": round(annual_gains_kWh, 1),
+        "peak_gains_kW":    round(peak_W / 1000.0, 2),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # LOADS CALCULATION
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -395,6 +430,29 @@ def calc_school_loads(inp: SchoolLoadsInput) -> dict:
                     if bill_kwh > 0 and total_estimated > 0
                     else 1.0)
 
+    # ── Internal heat gains from occupants ────────────────────────────────────
+    gains = _calc_internal_gains(inp)
+    reduction_pct = 0.0
+    if inp.heating_system == "heat_pump" and breakdown["heating_hp"] > 0:
+        heating_original = breakdown["heating_hp"]
+        heating_reduced  = max(0.0, heating_original - gains["annual_gains_kWh"])
+        reduction_pct    = (1 - heating_reduced / heating_original) * 100
+        breakdown["heating_hp"] = round(heating_reduced, 1)
+        total_estimated  = sum(breakdown.values())
+
+    internal_gains_info = {
+        "peak_kW":      gains["peak_gains_kW"],
+        "annual_kWh":   gains["annual_gains_kWh"],
+        "note": (
+            f"{inp.n_students} students + {inp.n_teachers} teachers produce "
+            f"{gains['peak_gains_kW']:.1f} kW of internal heat during occupied "
+            f"hours, offsetting {gains['annual_gains_kWh']:,.0f} kWh/yr of "
+            f"heating demand."
+        ),
+    }
+    if inp.heating_system == "heat_pump":
+        internal_gains_info["reduction_pct"] = round(reduction_pct, 1)
+
     total_annual = total_estimated * scale_factor
 
     # ── Build 8760-hour profile ───────────────────────────────────────────────
@@ -423,6 +481,7 @@ def calc_school_loads(inp: SchoolLoadsInput) -> dict:
         "peak_demand_kW":        round(peak_kW, 2),
         "school_days_per_month": school_days,
         "total_monthly_kwh":     monthly_kwh,
+        "internal_gains":        internal_gains_info,
     }
 
 

@@ -22,6 +22,8 @@ from school.calendar_it import (
     DAYS_BEFORE_MONTH,
     _doy_to_month,
     _is_school_day,
+    _in_school_year,
+    _is_holiday,
     _dow,
 )
 
@@ -74,54 +76,208 @@ class SchoolLoadsInput:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WEIGHT ARRAYS (8760 h) FOR CATEGORY-SPECIFIC LOAD SHAPES
+# CATEGORY-SPECIFIC HOURLY LOAD PROFILES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _pc_lab_weights(school_type: str) -> np.ndarray:
-    """School hours 8:00–14:00 on school days."""
-    w = np.zeros(8760)
+def _build_category_profiles(
+    inp: "SchoolLoadsInput",
+    breakdown: dict,
+    school_days: np.ndarray,
+) -> np.ndarray:
+    """
+    Builds 8760-hour demand profile [Wh] by distributing each consumption
+    category with its own hourly shape.
+
+    school_days: 8760-element bool array, True if that hour is a school day.
+    """
+    ev = inp.extra_evening
+    ew = inp.extra_weekend
+    st = inp.school_type
+
+    # ── Daily profiles (24 h, school-day weights) ─────────────────────────────
+
+    # Lighting — classrooms (aule)
+    p_aule = np.zeros(24)
+    p_aule[7] = 0.30
+    p_aule[8:14] = 1.00
+    p_aule[14] = 0.20
+    p_aule[15:18] = 0.05
+    p_aule[18:23] = 0.30 if ev else 0.02
+
+    # Lighting — corridors and common areas
+    p_corr = np.full(24, 0.02)
+    p_corr[6] = 0.30
+    p_corr[7:17] = 0.80
+    p_corr[17] = 0.40
+    p_corr[18:23] = 0.50 if ev else 0.05
+
+    # Composite: 70 % classrooms + 30 % corridors
+    p_light = 0.7 * p_aule + 0.3 * p_corr
+
+    # PC lab
+    p_comp = np.full(24, 0.02)
+    p_comp[8] = 0.30
+    p_comp[9:12] = 1.00
+    p_comp[12] = 0.50
+    if st == "high_tech":
+        p_comp[13:16] = 0.80
+        p_comp[16:18] = 0.10
+    else:
+        p_comp[13:18] = 0.10
+    p_comp[18:23] = 0.40 if ev else 0.02
+
+    # Technical / workshop lab (only high_tech; afternoon weighted for Mon+Wed)
+    p_tech = np.zeros(24)
+    p_tech[8:10] = 0.30
+    p_tech[10:13] = 1.00
+    p_tech[13] = 0.20
+    p_tech[14:17] = 0.80 * (2 / 6)   # Mon+Wed only → average over 6-day week
+
+    # Canteen
+    p_cant = np.zeros(24)
+    p_cant[10] = 0.30
+    p_cant[11] = 0.80
+    p_cant[12:14] = 1.00
+    p_cant[14] = 0.60
+    p_cant[15] = 0.10
+
+    # Gym
+    p_gym = np.zeros(24)
+    p_gym[8] = 0.10
+    p_gym[9:14] = 0.70
+    p_gym[14:18] = 0.10
+    p_gym[18:22] = 1.00 if ev else 0.00
+    p_gym[22] = 0.30 if ev else 0.00
+
+    # Admin / secretariat
+    p_adm = np.full(24, 0.02)
+    p_adm[8:17] = 1.00
+    p_adm[17] = 0.30
+
+    # Summer cooling (AC) — active months handled per-day below
+    p_ac = np.zeros(24)
+    p_ac[9:12] = 0.60
+    p_ac[12:17] = 1.00
+    p_ac[17:20] = 0.40
+
+    # Heat pump — pre-heating peak at 06:00 — active months per-day below
+    p_heat = np.zeros(24)
+    p_heat[6] = 1.00
+    p_heat[7] = 0.90
+    p_heat[8:14] = 0.50
+    p_heat[14:17] = 0.20
+
+    # Elevator
+    p_elev = np.full(24, 0.05)
+    p_elev[8:15] = 1.00
+
+    # Misc (servers, copiers, AV)
+    p_misc = np.full(24, 0.15)
+    p_misc[7:18] = 1.00
+    p_misc[18:23] = 0.50 if ev else 0.20
+
+    # ── Build 8760-h weight arrays ─────────────────────────────────────────────
+    w_light = np.zeros(8760)
+    w_comp  = np.zeros(8760)
+    w_tech  = np.zeros(8760)
+    w_cant  = np.zeros(8760)
+    w_gym   = np.zeros(8760)
+    w_adm   = np.zeros(8760)
+    w_ac    = np.zeros(8760)
+    w_heat  = np.zeros(8760)
+    w_elev  = np.zeros(8760)
+    w_misc  = np.zeros(8760)
+
     for doy in range(365):
-        if _is_school_day(doy, school_type):
-            base = doy * 24
-            for h in range(8, 14):
-                w[base + h] = 1.0
-    return w
+        base       = doy * 24
+        month      = _doy_to_month(doy)
+        dow        = _dow(doy)
+        is_school  = bool(school_days[base])
+        is_summer  = month in (7, 8)
+        is_weekend = dow >= 5                      # Sat=5, Sun=6
+        in_year    = _in_school_year(doy, st)
+        heat_active = (month >= 10 or month <= 4)
 
+        # AC: Jun (not primary) + Sep always; Jul-Aug only if evening/weekend use
+        if st == "primary":
+            ac_active = (month == 9)
+        else:
+            ac_active = month in (6, 9)
+        if is_summer and (ev or ew):
+            ac_active = True
 
-def _ac_weights() -> np.ndarray:
-    """June–August, 09:00–17:00."""
-    w = np.zeros(8760)
-    for doy in range(365):
-        month = _doy_to_month(doy)
-        if 6 <= month <= 8:
-            base = doy * 24
-            for h in range(9, 17):
-                w[base + h] = 1.0
-    return w
+        if is_school:
+            w_light[base:base+24] = p_light
+            w_comp[base:base+24]  = p_comp
+            w_tech[base:base+24]  = p_tech
+            w_cant[base:base+24]  = p_cant
+            w_gym[base:base+24]   = p_gym
+            w_adm[base:base+24]   = p_adm
+            w_elev[base:base+24]  = p_elev
+            w_misc[base:base+24]  = p_misc
+            w_ac[base:base+24]    = p_ac   if ac_active   else 0.0
+            w_heat[base:base+24]  = p_heat if heat_active else 0.0
 
+        elif is_summer:
+            # Only servers (misc × 0.15) + AC if active; everything else minimal
+            w_misc[base:base+24]  = 0.15 * p_misc
+            w_ac[base:base+24]    = p_ac if ac_active else 0.0
+            w_light[base:base+24] = 0.02 * p_light
+            w_comp[base:base+24]  = 0.02 * p_comp
+            w_cant[base:base+24]  = 0.02 * p_cant
+            w_gym[base:base+24]   = 0.02 * p_gym
+            w_adm[base:base+24]   = 0.02 * p_adm
+            w_elev[base:base+24]  = 0.02 * p_elev
 
-def _heating_weights() -> np.ndarray:
-    """October–April, 06:00–18:00."""
-    w = np.zeros(8760)
-    for doy in range(365):
-        month = _doy_to_month(doy)
-        if month >= 10 or month <= 4:
-            base = doy * 24
-            for h in range(6, 18):
-                w[base + h] = 1.0
-    return w
+        elif is_weekend and in_year:
+            if ew:
+                w_gym[base:base+24]  = 0.25 * p_gym
+                w_misc[base:base+24] = 0.25 * p_misc
+                w_light[base:base+24] = 0.02 * p_light
+                w_comp[base:base+24]  = 0.02 * p_comp
+                w_cant[base:base+24]  = 0.02 * p_cant
+                w_adm[base:base+24]   = 0.02 * p_adm
+                w_elev[base:base+24]  = 0.02 * p_elev
+            else:
+                w_light[base:base+24] = 0.02 * p_light
+                w_comp[base:base+24]  = 0.02 * p_comp
+                w_cant[base:base+24]  = 0.02 * p_cant
+                w_gym[base:base+24]   = 0.02 * p_gym
+                w_adm[base:base+24]   = 0.02 * p_adm
+                w_elev[base:base+24]  = 0.02 * p_elev
+                w_misc[base:base+24]  = 0.02 * p_misc
+            w_heat[base:base+24] = 0.02 * p_heat if heat_active else 0.0
 
+        else:
+            # Holiday, vacation, or other non-school non-summer day
+            w_light[base:base+24] = 0.02 * p_light
+            w_comp[base:base+24]  = 0.02 * p_comp
+            w_cant[base:base+24]  = 0.02 * p_cant
+            w_gym[base:base+24]   = 0.02 * p_gym
+            w_adm[base:base+24]   = 0.02 * p_adm
+            w_elev[base:base+24]  = 0.02 * p_elev
+            w_misc[base:base+24]  = 0.15 * p_misc
+            w_heat[base:base+24]  = 0.02 * p_heat if heat_active else 0.0
 
-def _canteen_weights(school_type: str) -> np.ndarray:
-    """11:30–13:30 → partial hours 11, full 12, partial 13 — on school days."""
-    w = np.zeros(8760)
-    for doy in range(365):
-        if _is_school_day(doy, school_type):
-            base = doy * 24
-            w[base + 11] = 0.5
-            w[base + 12] = 1.0
-            w[base + 13] = 0.5
-    return w
+    # ── Normalize and distribute ───────────────────────────────────────────────
+    def _dist(kwh: float, w: np.ndarray) -> np.ndarray:
+        s = w.sum()
+        if kwh <= 0.0 or s <= 0.0:
+            return np.zeros(8760)
+        return w * (kwh * 1000.0 / s)
+
+    return (
+        _dist(breakdown["lighting"],   w_light)
+        + _dist(breakdown["computers"],  w_comp)
+        + _dist(breakdown["tech_lab"],   w_tech)
+        + _dist(breakdown["canteen"],    w_cant)
+        + _dist(breakdown["gym"],        w_gym)
+        + _dist(breakdown["admin"],      w_adm)
+        + _dist(breakdown["ac"],         w_ac)
+        + _dist(breakdown["heating_hp"], w_heat)
+        + _dist(breakdown["elevator"],   w_elev)
+        + _dist(breakdown["misc"],       w_misc)
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -242,34 +398,12 @@ def calc_school_loads(inp: SchoolLoadsInput) -> dict:
     total_annual = total_estimated * scale_factor
 
     # ── Build 8760-hour profile ───────────────────────────────────────────────
-    general_w  = build_school_calendar(
-        inp.school_type, inp.extra_evening, inp.extra_weekend, inp.full_time
-    )
-    pc_w       = _pc_lab_weights(inp.school_type)
-    ac_w       = _ac_weights()
-    heat_w     = _heating_weights()
-    canteen_w  = _canteen_weights(inp.school_type)
-    gym_w      = general_w.copy() if inp.has_gym else np.zeros(8760)
+    school_days_arr = np.zeros(8760, dtype=bool)
+    for _doy in range(365):
+        if _is_school_day(_doy, inp.school_type):
+            school_days_arr[_doy * 24:(_doy + 1) * 24] = True
 
-    def _distribute(kwh: float, weights: np.ndarray) -> np.ndarray:
-        w_sum = weights.sum()
-        if kwh <= 0.0 or w_sum <= 0.0:
-            return np.zeros(8760)
-        return weights * (kwh * 1000.0 / w_sum)
-
-    hourly_Wh = (
-        _distribute(breakdown["lighting"],   general_w)
-        + _distribute(breakdown["computers"],  pc_w)
-        + _distribute(breakdown["tech_lab"],   pc_w)
-        + _distribute(breakdown["canteen"],    canteen_w)
-        + _distribute(breakdown["gym"],        gym_w)
-        + _distribute(breakdown["admin"],      general_w)
-        + _distribute(breakdown["elevator"],   general_w)
-        + _distribute(breakdown["ac"],         ac_w)
-        + _distribute(breakdown["heating_hp"], heat_w)
-        + _distribute(breakdown["misc"],       general_w)
-    )
-
+    hourly_Wh = _build_category_profiles(inp, breakdown, school_days_arr)
     hourly_Wh *= scale_factor
 
     # ── Monthly totals ────────────────────────────────────────────────────────

@@ -311,6 +311,9 @@ def run_simulation_school(
     cer_incentive_eur_kwh: float = 0.0,
     cer_fraction: float = 0.0,
     lifetime_years: int = 25,
+    pv_degradation_pct_per_yr: float = 0.50,
+    inverter_replacement_year: int = 12,
+    inverter_replacement_cost_pct: float = 0.15,
 ):
     """
     Run the full PV feasibility pipeline using the school hourly load profile.
@@ -410,9 +413,9 @@ def run_simulation_school(
         battery_strategy        = "self_consumption",
     )
     yearly_balance = simulate_lifetime(
-        base_inp              = eb_inp,
-        lifetime_years        = lifetime_years,
-        pv_degradation_pct_per_yr = 0.50,
+        base_inp                  = eb_inp,
+        lifetime_years            = lifetime_years,
+        pv_degradation_pct_per_yr = pv_degradation_pct_per_yr,
     )
 
     # ── Economics ─────────────────────────────────────────────────────────────
@@ -433,14 +436,16 @@ def run_simulation_school(
         cer_shared_fraction    = cer_fraction,
     )
     opex = OperatingCost(
-        om_pct_of_capex_per_yr     = 1.0,
-        inverter_replacement_year  = 12,
+        om_pct_of_capex_per_yr    = 1.0,
+        inverter_replacement_year = 0,   # disabled — fin-based mechanism below
     )
     fin = FinancialParameters(
-        discount_rate           = 0.04,
-        energy_price_escalation = 0.03,
-        analysis_years          = lifetime_years,
-        financing_equity_fraction=1.0,
+        discount_rate                = 0.04,
+        energy_price_escalation      = 0.03,
+        analysis_years               = lifetime_years,
+        financing_equity_fraction    = 1.0,
+        inverter_replacement_year    = inverter_replacement_year,
+        inverter_replacement_cost_pct= inverter_replacement_cost_pct,
     )
     economics_result = calc_economics(
         yearly_results = yearly_balance,

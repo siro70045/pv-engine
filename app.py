@@ -889,10 +889,11 @@ def _run_sim(kwp, label):
                 occupancy_hour_start    = ss("occ_hour", 0),
             ),
             pv_system = PVSystemInput(
-                peak_power_kWp = float(kwp),
-                tilt_deg       = float(ss("tilt_deg", 15)),
-                azimuth_deg    = float(ss("azimuth_from_map") or 180),
-                mounting       = ss("mounting","flat_roof_ballast"),
+                peak_power_kWp              = float(kwp),
+                tilt_deg                    = float(ss("tilt_deg", 15)),
+                azimuth_deg                 = float(ss("azimuth_from_map") or 180),
+                mounting                    = ss("mounting","flat_roof_ballast"),
+                degradation_rate_pct_per_yr = float(ss("degrad_pct", 0.5)),
             ),
             battery   = BatteryInput(capacity_kWh=0),
             investment= InvestmentCost(
@@ -904,10 +905,16 @@ def _run_sim(kwp, label):
                 import_price_eur_kWh = ss("el_price",0.22),
                 export_price_eur_kWh = ss("export_price",0.08),
             ),
-            opex      = OperatingCost(om_pct_of_capex_per_yr=1.0),
+            opex      = OperatingCost(
+                om_pct_of_capex_per_yr=1.0,
+                inverter_replacement_year=0,  # fin-based mechanism below
+            ),
             financial = FinancialParameters(
                 discount_rate=0.05, energy_price_escalation=0.03,
-                analysis_years=25),
+                analysis_years=25,
+                inverter_replacement_year=int(ss("inv_repl_year", 12)),
+                inverter_replacement_cost_pct=float(ss("inv_repl_pct", 15)) / 100.0,
+            ),
             incentives = inc,
             gas_system = GasSystemInput(
                 has_gas=has_gas,
@@ -974,6 +981,22 @@ def step_impianto():
                     "flat_roof_ballast":"Flat roof","roof_integrated":"Pitched roof",
                     "ground_fixed":"Ground-mounted","bipv":"BIPV (facade)"}[x])
             sset(mounting=mounting)
+
+    # Advanced financial parameters
+    with st.expander("Advanced financial parameters", expanded=False):
+        af1, af2, af3 = st.columns(3)
+        with af1:
+            deg = st.slider("Panel degradation [%/yr]", 0.3, 0.8,
+                            float(ss("degrad_pct", 0.5)), 0.05, format="%.2f%%")
+            sset(degrad_pct=deg)
+        with af2:
+            inv_yr = st.slider("Inverter replacement (year)", 8, 15,
+                               int(ss("inv_repl_year", 12)), 1)
+            sset(inv_repl_year=inv_yr)
+        with af3:
+            inv_pct = st.slider("Inverter replacement cost [% of CAPEX]", 10, 20,
+                                int(ss("inv_repl_pct", 15)), 1)
+            sset(inv_repl_pct=inv_pct)
 
     # Calcolo area e taglie
     buildings  = ss("buildings_cache") or []
@@ -1391,10 +1414,15 @@ def step_risultati():
         fig.add_trace(go.Scatter(x=yrs, y=cum_cf, name="Cumulative CF", line=dict(color="#1565c0",width=2.5),
                                  mode="lines+markers", marker_size=4))
         fig.add_hline(y=0, line_dash="dash", line_color="#9ca3af", line_width=1)
+        _inv_yr = int(ss("inv_repl_year", 12))
+        fig.add_vline(x=_inv_yr, line_dash="dot", line_color="#ef4444", line_width=1.5,
+                      annotation_text="Inverter replacement",
+                      annotation_position="top right",
+                      annotation_font_size=10, annotation_font_color="#ef4444")
         fig.update_layout(yaxis_title="€", plot_bgcolor="white",
                           paper_bgcolor="white",
                           legend=dict(orientation="h",y=1.05),
-                          margin=dict(t=15,b=40,l=70,r=20), height=300)
+                          margin=dict(t=30,b=40,l=70,r=20), height=300)
         fig.update_yaxes(gridcolor="#f3f4f6")
         st.plotly_chart(fig, use_container_width=True)
         cap = (captions or {}).get("cashflow")

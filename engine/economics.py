@@ -184,6 +184,8 @@ class FinancialParameters:
     financing_equity_fraction: float = 1.0
     loan_interest_rate: float = 0.04
     loan_duration_years: int = 10
+    inverter_replacement_year: int = 12
+    inverter_replacement_cost_pct: float = 0.0
 
 
 @dataclass
@@ -664,6 +666,8 @@ def _calc_economics_core(
             repl += opex.inverter_replacement_cost_eur
         if yr in opex.battery_replacement_years and investment.battery_capacity_kWh > 0:
             repl += investment.battery_capacity_kWh * opex.battery_replacement_cost_eur_kWh
+        if fin.inverter_replacement_cost_pct > 0 and yr == fin.inverter_replacement_year:
+            repl += capex * fin.inverter_replacement_cost_pct
         loan    = loan_pmt if yr <= fin.loan_duration_years else 0.0
         tax     = 0.0
         if yr <= incentives.detrazione_spread_years:
@@ -830,6 +834,8 @@ def calc_economics(
         if yr in opex.battery_replacement_years and investment.battery_capacity_kWh > 0:
             repl_cost += (investment.battery_capacity_kWh
                           * opex.battery_replacement_cost_eur_kWh)
+        if fin.inverter_replacement_cost_pct > 0 and yr == fin.inverter_replacement_year:
+            repl_cost += capex * fin.inverter_replacement_cost_pct
 
         # Loan payment (0 after loan_duration_years)
         loan_pmt = annual_loan_pmt if yr <= fin.loan_duration_years else 0.0

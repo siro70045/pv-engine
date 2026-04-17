@@ -864,6 +864,22 @@ def step_system():
             )
             sset(mounting=mounting)
 
+    # ── Advanced financial parameters ─────────────────────────────────────────
+    with st.expander("Advanced financial parameters", expanded=False):
+        af1, af2, af3 = st.columns(3)
+        with af1:
+            deg = st.slider("Panel degradation [%/yr]", 0.3, 0.8,
+                            float(ss("degrad_pct", 0.5)), 0.05, format="%.2f%%")
+            sset(degrad_pct=deg)
+        with af2:
+            inv_yr = st.slider("Inverter replacement (year)", 8, 15,
+                               int(ss("inv_repl_year", 12)), 1)
+            sset(inv_repl_year=inv_yr)
+        with af3:
+            inv_pct = st.slider("Inverter replacement cost [% of CAPEX]", 10, 20,
+                                int(ss("inv_repl_pct", 15)), 1)
+            sset(inv_repl_pct=inv_pct)
+
     # Auto-size from OSM / floor area
     buildings  = ss("buildings_cache") or []
     c_lat      = ss("center_lat")
@@ -1044,20 +1060,23 @@ def _run_sim_school(
         )
 
         r = run_simulation_school(
-            tmy                  = tmy,
-            school_loads         = loads_result,
-            floor_area_m2        = floor_area,
-            kwp                  = kwp,
-            azimuth_deg          = float(ss("azimuth_from_map") or 180),
-            tilt_deg             = float(ss("tilt_deg", 10)),
-            import_price         = ss("el_price", 0.22),
-            export_price         = ss("export_price", 0.08),
-            capex_eur            = float(inc["capex_iva_corrected"]),
-            structural_eur       = float(structural),
-            pnrr_grant           = float(inc["pnrr_grant"]),
-            cer_incentive_eur_kwh= cer_incentive if cer_fraction > 0 else 0.0,
-            cer_fraction         = cer_fraction,
-            lifetime_years       = 25,
+            tmy                       = tmy,
+            school_loads              = loads_result,
+            floor_area_m2             = floor_area,
+            kwp                       = kwp,
+            azimuth_deg               = float(ss("azimuth_from_map") or 180),
+            tilt_deg                  = float(ss("tilt_deg", 10)),
+            import_price              = ss("el_price", 0.22),
+            export_price              = ss("export_price", 0.08),
+            capex_eur                 = float(inc["capex_iva_corrected"]),
+            structural_eur            = float(structural),
+            pnrr_grant                = float(inc["pnrr_grant"]),
+            cer_incentive_eur_kwh     = cer_incentive if cer_fraction > 0 else 0.0,
+            cer_fraction              = cer_fraction,
+            lifetime_years            = 25,
+            pv_degradation_pct_per_yr = float(ss("degrad_pct", 0.5)),
+            inverter_replacement_year = int(ss("inv_repl_year", 12)),
+            inverter_replacement_cost_pct = float(ss("inv_repl_pct", 15)) / 100.0,
         )
 
         d   = result_to_dict(r)
@@ -1279,10 +1298,15 @@ def step_results():
                                  line=dict(color="#1565c0", width=2.5),
                                  mode="lines+markers", marker_size=4))
         fig.add_hline(y=0, line_dash="dash", line_color="#9ca3af", line_width=1)
+        _inv_yr = int(ss("inv_repl_year", 12))
+        fig.add_vline(x=_inv_yr, line_dash="dot", line_color="#ef4444", line_width=1.5,
+                      annotation_text="Inverter replacement",
+                      annotation_position="top right",
+                      annotation_font_size=10, annotation_font_color="#ef4444")
         fig.update_layout(yaxis_title="€", plot_bgcolor="white",
                           paper_bgcolor="white",
                           legend=dict(orientation="h", y=1.05),
-                          margin=dict(t=15, b=40, l=70, r=20), height=300)
+                          margin=dict(t=30, b=40, l=70, r=20), height=300)
         fig.update_yaxes(gridcolor="#f3f4f6")
         st.plotly_chart(fig, use_container_width=True)
 

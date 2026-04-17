@@ -26,6 +26,13 @@ from school.calendar_it import (
     _is_holiday,
     _dow,
 )
+from school.climate_zones import (
+    get_thermal_benchmark,
+    get_electric_benchmark,
+    get_heating_season,
+    zone_from_latitude,
+    CLIMATE_ZONES,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -70,6 +77,9 @@ class SchoolLoadsInput:
     # Illuminazione
     lighting_type: str = "fluorescent"
 
+    # Zona climatica (DPR 412/93)
+    climate_zone: str = "E"
+
     # Bollette
     annual_bill_kwh: float = 0.0
     monthly_bill_kwh: list = field(default_factory=lambda: [0.0] * 12)
@@ -83,12 +93,14 @@ def _build_category_profiles(
     inp: "SchoolLoadsInput",
     breakdown: dict,
     school_days: np.ndarray,
+    heating_season: tuple[int, int] = (10, 4),
 ) -> np.ndarray:
     """
     Builds 8760-hour demand profile [Wh] by distributing each consumption
     category with its own hourly shape.
 
     school_days: 8760-element bool array, True if that hour is a school day.
+    heating_season: (start_month, end_month) from get_heating_season().
     """
     ev = inp.extra_evening
     ew = inp.extra_weekend
@@ -196,7 +208,8 @@ def _build_category_profiles(
         is_summer  = month in (7, 8)
         is_weekend = dow >= 5                      # Sat=5, Sun=6
         in_year    = _in_school_year(doy, st)
-        heat_active = (month >= 10 or month <= 4)
+        hs, he = heating_season
+        heat_active = (month >= hs or month <= he) if hs > he else (hs <= month <= he)
 
         # AC: Jun (not primary) + Sep always; Jul-Aug only if evening/weekend use
         if st == "primary":
@@ -337,15 +350,12 @@ def calc_school_loads(inp: SchoolLoadsInput) -> dict:
     school_days = school_days_per_month(inp.school_type)
     total_school_days = sum(school_days)
 
-    # ── Thermal need per m² depending on construction era ─────────────────────
-    if inp.construction_year < 1973:
-        heat_need_kwh_m2 = 120.0
-    elif inp.construction_year < 1990:
-        heat_need_kwh_m2 = 90.0
-    elif inp.construction_year < 2010:
-        heat_need_kwh_m2 = 60.0
-    else:
-        heat_need_kwh_m2 = 40.0
+    # ── Climate zone and heating season ──────────────────────────────────────
+    zone = inp.climate_zone if inp.climate_zone in CLIMATE_ZONES else "E"
+    heating_season = get_heating_season(zone)
+    thermal_benchmark_kwh = get_thermal_benchmark(zone, inp.construction_year, inp.floor_area_m2)
+    heat_need_kwh_m2 = thermal_benchmark_kwh / inp.floor_area_m2
+    electric_benchmark_kwh = get_electric_benchmark(zone, inp.school_type, inp.floor_area_m2)
 
     # ── School day length (hours of active use) ────────────────────────────────
     if inp.school_type == "university_dept":
@@ -461,7 +471,7 @@ def calc_school_loads(inp: SchoolLoadsInput) -> dict:
         if _is_school_day(_doy, inp.school_type):
             school_days_arr[_doy * 24:(_doy + 1) * 24] = True
 
-    hourly_Wh = _build_category_profiles(inp, breakdown, school_days_arr)
+    hourly_Wh = _build_category_profiles(inp, breakdown, school_days_arr, heating_season)
     hourly_Wh *= scale_factor
 
     # ── Monthly totals ────────────────────────────────────────────────────────
@@ -474,14 +484,17 @@ def calc_school_loads(inp: SchoolLoadsInput) -> dict:
     peak_kW = float(hourly_Wh.max()) / 1000.0
 
     return {
-        "hourly_demand_Wh":      [round(float(v), 2) for v in hourly_Wh],
-        "total_annual_kwh":      round(total_annual, 1),
-        "breakdown":             breakdown,
-        "scale_factor":          round(scale_factor, 4),
-        "peak_demand_kW":        round(peak_kW, 2),
-        "school_days_per_month": school_days,
-        "total_monthly_kwh":     monthly_kwh,
-        "internal_gains":        internal_gains_info,
+        "hourly_demand_Wh":             [round(float(v), 2) for v in hourly_Wh],
+        "total_annual_kwh":             round(total_annual, 1),
+        "breakdown":                    breakdown,
+        "scale_factor":                 round(scale_factor, 4),
+        "peak_demand_kW":               round(peak_kW, 2),
+        "school_days_per_month":        school_days,
+        "total_monthly_kwh":            monthly_kwh,
+        "internal_gains":               internal_gains_info,
+        "climate_zone":                 zone,
+        "thermal_benchmark_kWh_m2":     round(heat_need_kwh_m2, 1),
+        "electric_benchmark_kWh_m2":    round(electric_benchmark_kwh / inp.floor_area_m2, 1),
     }
 
 

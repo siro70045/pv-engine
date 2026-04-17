@@ -513,6 +513,36 @@ def step_institution():
 
     st.divider()
 
+    # ── Climate zone ──────────────────────────────────────────────────────────
+    from school.climate_zones import CLIMATE_ZONES, zone_from_latitude
+
+    # Auto-detect from latitude if available
+    _auto_zone = "E"
+    _lat = ss("center_lat")
+    if _lat:
+        _auto_zone = zone_from_latitude(float(_lat))
+
+    _zone_labels = {z: d["label"] for z, d in CLIMATE_ZONES.items()}
+    _prev_zone = ss("climate_zone", _auto_zone)
+    _zone_idx  = list(_zone_labels.keys()).index(_prev_zone) if _prev_zone in _zone_labels else 4
+
+    st.markdown('<div class="slbl">Climate zone (DPR 412/93)</div>', unsafe_allow_html=True)
+    climate_zone = st.selectbox(
+        "Climate zone",
+        list(_zone_labels.keys()),
+        index=_zone_idx,
+        format_func=lambda z: _zone_labels[z],
+        label_visibility="collapsed",
+        help="Italian climate zone per DPR 412/93. Determines heating season and thermal benchmarks.",
+    )
+    sset(climate_zone=climate_zone)
+    if _lat and _auto_zone != climate_zone:
+        st.caption(f"Auto-detected zone from latitude: **{_auto_zone}** — overridden to {climate_zone}.")
+    elif _lat:
+        st.caption(f"Auto-detected from latitude {float(_lat):.2f}°N.")
+
+    st.divider()
+
     c1, c2 = st.columns(2)
     with c1:
         is_public = st.toggle(
@@ -798,6 +828,7 @@ def step_energy():
             has_ac            = has_ac,
             ac_type           = ac_type,
             lighting_type     = ss("lighting_type", "fluorescent"),
+            climate_zone      = ss("climate_zone", "E"),
             annual_bill_kwh   = float(total_el) if total_el > 0 else 0.0,
         )
         _loads_est = calc_school_loads(_school_inp)

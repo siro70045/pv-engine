@@ -144,7 +144,7 @@ def _calc_dhw_demand(inp: "SchoolLoadsInput", climate_zone: str) -> dict:
 
             # Uso serale da associazioni (3 sere/settimana × 12 docce/sera)
             if inp.extra_evening:
-                evening_showers = 3 * 12 * (days / 5)
+                evening_showers = 3 * 4 * (days / 5)
                 gym_kwh += evening_showers * kwh_per_shower
 
         # ── Lavabi comuni ────────────────────────────────────────────────────

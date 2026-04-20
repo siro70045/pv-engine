@@ -831,7 +831,9 @@ def step_energy():
             climate_zone      = ss("climate_zone", "E"),
             annual_bill_kwh   = float(total_el) if total_el > 0 else 0.0,
         )
-        _loads_est = calc_school_loads(_school_inp)
+        _tmy = ss("tmy_data")
+        _tmy_ghi = [rec.G_h for rec in _tmy.hourly] if _tmy is not None else None
+        _loads_est = calc_school_loads(_school_inp, tmy_hourly_ghi=_tmy_ghi)
         sset(school_loads_result=_loads_est)
 
     est_kwh  = _loads_est["total_annual_kwh"]
@@ -1358,6 +1360,16 @@ def step_results():
             for k, v in bd.items() if v > 0
         ]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        if loads_r.get("lighting_daylight_aware"):
+            details = loads_r["lighting_details"]
+            st.caption(
+                f"Lighting adjusted for natural daylight: "
+                f"{details['classroom_kwh']:,.0f} kWh classrooms (daylight-aware), "
+                f"{details['corridor_kwh']:,.0f} kWh corridors. "
+                f"Winter mornings consume ~{details['winter_vs_summer_ratio']:.1f}x "
+                f"more than summer."
+            )
 
         if loads_r.get("internal_gains"):
             ig = loads_r["internal_gains"]

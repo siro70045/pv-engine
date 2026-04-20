@@ -94,6 +94,7 @@ def _build_category_profiles(
     breakdown: dict,
     school_days: np.ndarray,
     heating_season: tuple[int, int] = (10, 4),
+    tmy_hourly_ghi: "list[float] | None" = None,
 ) -> np.ndarray:
     """
     Builds 8760-hour demand profile [Wh] by distributing each consumption
@@ -279,8 +280,60 @@ def _build_category_profiles(
             return np.zeros(8760)
         return w * (kwh * 1000.0 / s)
 
+    # ── Daylight-aware lighting (uses TMY GHI when available) ─────────────────
+    if tmy_hourly_ghi is not None and len(tmy_hourly_ghi) == 8760:
+        total_lighting = breakdown["lighting"]
+        classroom_kwh  = total_lighting * 0.70
+        corridor_kwh   = total_lighting * 0.30
+
+        # Daylight factor for classrooms per UNI EN 12464-1 model
+        _ghi_pts  = [150,  200,  300,  400,  500,  600]
+        _fact_pts = [1.00, 0.90, 0.60, 0.40, 0.30, 0.25]
+
+        def _daylight_factor(ghi: float) -> float:
+            if ghi <= _ghi_pts[0]:
+                return _fact_pts[0]
+            if ghi >= _ghi_pts[-1]:
+                return _fact_pts[-1]
+            for j in range(len(_ghi_pts) - 1):
+                if _ghi_pts[j] <= ghi <= _ghi_pts[j + 1]:
+                    t = (ghi - _ghi_pts[j]) / (_ghi_pts[j + 1] - _ghi_pts[j])
+                    return _fact_pts[j] + t * (_fact_pts[j + 1] - _fact_pts[j])
+            return _fact_pts[-1]
+
+        classroom_profile = np.zeros(8760)
+        corridor_profile  = np.zeros(8760)
+
+        for i in range(8760):
+            hod   = i % 24
+            denom = 0.7 * p_aule[hod] + 0.3 * p_corr[hod]
+            if denom > 0:
+                w_aule_i = w_light[i] * (0.7 * p_aule[hod]) / denom
+                w_corr_i = w_light[i] * (0.3 * p_corr[hod]) / denom
+            else:
+                w_aule_i = w_corr_i = 0.0
+
+            ghi = tmy_hourly_ghi[i]
+            df  = _daylight_factor(ghi)
+            classroom_profile[i] = w_aule_i * df
+
+            # Corridors: 20% reduction when GHI > 400 W/m² (skylights)
+            df_corr = 0.80 if ghi > 400 else 1.00
+            corridor_profile[i]  = w_corr_i * df_corr
+
+        sum_class = classroom_profile.sum()
+        sum_corr  = corridor_profile.sum()
+        if sum_class > 0:
+            classroom_profile *= (classroom_kwh * 1000.0) / sum_class
+        if sum_corr > 0:
+            corridor_profile  *= (corridor_kwh  * 1000.0) / sum_corr
+
+        lighting_Wh = classroom_profile + corridor_profile
+    else:
+        lighting_Wh = _dist(breakdown["lighting"], w_light)
+
     return (
-        _dist(breakdown["lighting"],   w_light)
+        lighting_Wh
         + _dist(breakdown["computers"],  w_comp)
         + _dist(breakdown["tech_lab"],   w_tech)
         + _dist(breakdown["canteen"],    w_cant)
@@ -332,7 +385,10 @@ def _calc_internal_gains(inp: "SchoolLoadsInput") -> dict:
 # LOADS CALCULATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def calc_school_loads(inp: SchoolLoadsInput) -> dict:
+def calc_school_loads(
+    inp: SchoolLoadsInput,
+    tmy_hourly_ghi: "list[float] | None" = None,
+) -> dict:
     """
     Calcola il profilo di carico elettrico orario di una scuola italiana.
 
@@ -471,7 +527,9 @@ def calc_school_loads(inp: SchoolLoadsInput) -> dict:
         if _is_school_day(_doy, inp.school_type):
             school_days_arr[_doy * 24:(_doy + 1) * 24] = True
 
-    hourly_Wh = _build_category_profiles(inp, breakdown, school_days_arr, heating_season)
+    hourly_Wh = _build_category_profiles(
+        inp, breakdown, school_days_arr, heating_season, tmy_hourly_ghi
+    )
     hourly_Wh *= scale_factor
 
     # ── Monthly totals ────────────────────────────────────────────────────────
@@ -482,6 +540,52 @@ def calc_school_loads(inp: SchoolLoadsInput) -> dict:
         monthly_kwh.append(round(float(hourly_Wh[start:end].sum()) / 1000.0, 1))
 
     peak_kW = float(hourly_Wh.max()) / 1000.0
+
+    # ── Daylight-aware lighting metadata ─────────────────────────────────────
+    daylight_aware = tmy_hourly_ghi is not None and len(tmy_hourly_ghi) == 8760
+    lighting_details: dict = {}
+    if daylight_aware:
+        total_lighting = breakdown["lighting"]
+        classroom_kwh_d = total_lighting * 0.70
+        corridor_kwh_d  = total_lighting * 0.30
+
+        # Peak winter (Dec=335..365 + Jan=0..31 + Feb=31..59) hours 8-10
+        # Peak summer (Jun=151..181) hours 8-10
+        def _peak(start_day: int, n_days: int) -> float:
+            s = start_day * 24
+            e = s + n_days * 24
+            vals = [hourly_Wh[i] for i in range(s, e) if i % 24 in (8, 9)]
+            return max(vals) / 1000.0 if vals else 0.0
+
+        pk_win = max(
+            _peak(DAYS_BEFORE_MONTH[11], DAYS_PER_MONTH[11]),   # Dec
+            _peak(DAYS_BEFORE_MONTH[0],  DAYS_PER_MONTH[0]),    # Jan
+            _peak(DAYS_BEFORE_MONTH[1],  DAYS_PER_MONTH[1]),    # Feb
+        )
+        pk_sum = _peak(DAYS_BEFORE_MONTH[5], DAYS_PER_MONTH[5])  # Jun
+
+        # Average winter/summer morning load for ratio
+        def _avg_morning(start_day: int, n_days: int) -> float:
+            s = start_day * 24
+            e = s + n_days * 24
+            vals = [hourly_Wh[i] for i in range(s, e) if i % 24 in (8, 9)]
+            return float(np.mean(vals)) / 1000.0 if vals else 0.0
+
+        avg_win = max(
+            _avg_morning(DAYS_BEFORE_MONTH[11], DAYS_PER_MONTH[11]),
+            _avg_morning(DAYS_BEFORE_MONTH[0],  DAYS_PER_MONTH[0]),
+            _avg_morning(DAYS_BEFORE_MONTH[1],  DAYS_PER_MONTH[1]),
+        )
+        avg_sum = _avg_morning(DAYS_BEFORE_MONTH[5], DAYS_PER_MONTH[5])
+        ratio   = avg_win / max(avg_sum, 0.001)
+
+        lighting_details = {
+            "classroom_kwh":        round(classroom_kwh_d, 1),
+            "corridor_kwh":         round(corridor_kwh_d, 1),
+            "peak_winter_kw":       round(pk_win, 2),
+            "peak_summer_kw":       round(pk_sum, 2),
+            "winter_vs_summer_ratio": round(ratio, 2),
+        }
 
     return {
         "hourly_demand_Wh":             [round(float(v), 2) for v in hourly_Wh],
@@ -495,6 +599,8 @@ def calc_school_loads(inp: SchoolLoadsInput) -> dict:
         "climate_zone":                 zone,
         "thermal_benchmark_kWh_m2":     round(heat_need_kwh_m2, 1),
         "electric_benchmark_kWh_m2":    round(electric_benchmark_kwh / inp.floor_area_m2, 1),
+        "lighting_daylight_aware":      daylight_aware,
+        "lighting_details":             lighting_details,
     }
 
 

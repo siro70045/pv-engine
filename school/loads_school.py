@@ -130,13 +130,22 @@ def _calc_dhw_demand(inp: "SchoolLoadsInput", climate_zone: str) -> dict:
             mensa_kwh     = meals_per_day * days * 0.30 * factor_t
 
         # ── Palestra / docce ─────────────────────────────────────────────────
+        # Nelle scuole italiane le docce sono usate raramente durante
+        # l'orario scolastico (2-5% degli studenti). Solo le associazioni
+        # sportive serali usano sistematicamente le docce.
         gym_kwh = 0.0
         if inp.has_gym and days > 0:
-            showers = inp.n_students * 0.8 * (days / 5)
             kwh_per_shower = 45 * (38 - tc) * 0.00116
-            gym_kwh = showers * kwh_per_shower
+
+            # Uso scolastico: tasso base molto basso
+            base_rate = 0.08 if inp.extra_weekend else 0.03
+            school_showers = inp.n_students * base_rate * (days / 5)
+            gym_kwh = school_showers * kwh_per_shower
+
+            # Uso serale da associazioni (3 sere/settimana × 12 docce/sera)
             if inp.extra_evening:
-                gym_kwh *= 1.30
+                evening_showers = 3 * 12 * (days / 5)
+                gym_kwh += evening_showers * kwh_per_shower
 
         # ── Lavabi comuni ────────────────────────────────────────────────────
         washroom_kwh = 0.0

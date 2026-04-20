@@ -80,9 +80,96 @@ class SchoolLoadsInput:
     # Zona climatica (DPR 412/93)
     climate_zone: str = "E"
 
+    # ACS (acqua calda sanitaria)
+    dhw_system: str = "electric"             # "electric" / "gas" / "heat_pump" / "none"
+    dhw_standby_losses_pct: float = 0.15     # perdite accumulo/distribuzione
+
     # Bollette
     annual_bill_kwh: float = 0.0
     monthly_bill_kwh: list = field(default_factory=lambda: [0.0] * 12)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DHW (ACQUA CALDA SANITARIA)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _calc_dhw_demand(inp: "SchoolLoadsInput", climate_zone: str) -> dict:
+    """
+    Calcola il fabbisogno annuo di ACS [kWh_th] suddiviso per uso
+    (mensa, palestra/docce, lavabi) con variazione stagionale della
+    temperatura dell'acqua di rete.
+
+    Restituisce energia termica al punto di utilizzo, prima delle
+    perdite di sistema e del rendimento del generatore.
+    """
+    # Temperatura acqua di rete per mese (°C) — Italia centro-nord (zone D/E/F)
+    t_cold = [8, 9, 11, 13, 16, 18, 20, 20, 17, 14, 11, 9]
+    if climate_zone in ("A", "B", "C"):
+        t_cold = [t + 2 for t in t_cold]
+
+    school_days = school_days_per_month(inp.school_type)
+
+    total_mensa    = 0.0
+    total_gym      = 0.0
+    total_washroom = 0.0
+    monthly_breakdown = []
+
+    for m in range(12):
+        days   = school_days[m]
+        tc     = t_cold[m]
+
+        # ── Mensa ────────────────────────────────────────────────────────────
+        mensa_kwh = 0.0
+        if inp.has_canteen and days > 0:
+            if inp.full_time or inp.school_type == "primary":
+                meals_per_day = inp.n_students + inp.n_teachers + inp.n_ata_staff
+            else:
+                meals_per_day = int(inp.n_students * 0.15) + inp.n_ata_staff
+            delta_t_mensa = 55 - tc
+            factor_t      = delta_t_mensa / (55 - 14)
+            mensa_kwh     = meals_per_day * days * 0.30 * factor_t
+
+        # ── Palestra / docce ─────────────────────────────────────────────────
+        gym_kwh = 0.0
+        if inp.has_gym and days > 0:
+            showers = inp.n_students * 0.8 * (days / 5)
+            kwh_per_shower = 45 * (38 - tc) * 0.00116
+            gym_kwh = showers * kwh_per_shower
+            if inp.extra_evening:
+                gym_kwh *= 1.30
+
+        # ── Lavabi comuni ────────────────────────────────────────────────────
+        washroom_kwh = 0.0
+        if days > 0:
+            if m in (11, 0, 1, 2):
+                wf = 1.5
+            elif m in (3, 10):
+                wf = 1.0
+            elif m in (4, 9):
+                wf = 0.6
+            else:
+                wf = 0.3
+            base_L = 0.7 if inp.construction_year >= 1990 else 0.3
+            total_people  = inp.n_students + inp.n_teachers + inp.n_ata_staff
+            washroom_kwh  = total_people * days * base_L * wf * (40 - tc) * 0.00116
+
+        total_mensa    += mensa_kwh
+        total_gym      += gym_kwh
+        total_washroom += washroom_kwh
+        monthly_breakdown.append({"mensa": mensa_kwh, "gym": gym_kwh,
+                                   "washroom": washroom_kwh})
+
+    mult = 1.0 + inp.dhw_standby_losses_pct
+    return {
+        "total_thermal_kwh": (total_mensa + total_gym + total_washroom) * mult,
+        "mensa_kwh":         total_mensa    * mult,
+        "gym_kwh":           total_gym      * mult,
+        "washroom_kwh":      total_washroom * mult,
+        "monthly_breakdown": [
+            {k: v * mult for k, v in mb.items()}
+            for mb in monthly_breakdown
+        ],
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -95,6 +182,7 @@ def _build_category_profiles(
     school_days: np.ndarray,
     heating_season: tuple[int, int] = (10, 4),
     tmy_hourly_ghi: "list[float] | None" = None,
+    dhw_result: "dict | None" = None,
 ) -> np.ndarray:
     """
     Builds 8760-hour demand profile [Wh] by distributing each consumption
@@ -332,17 +420,59 @@ def _build_category_profiles(
     else:
         lighting_Wh = _dist(breakdown["lighting"], w_light)
 
+    # ── DHW (ACS) profile ────────────────────────────────────────────────────
+    w_dhw = np.zeros(8760)
+    if dhw_result is not None and breakdown.get("dhw", 0.0) > 0:
+        p_dhw_mensa = np.zeros(24)
+        p_dhw_mensa[8]  = 0.05; p_dhw_mensa[9]  = 0.10; p_dhw_mensa[10] = 0.20
+        p_dhw_mensa[11] = 0.50; p_dhw_mensa[12] = 1.00; p_dhw_mensa[13] = 0.80
+        p_dhw_mensa[14] = 0.40; p_dhw_mensa[15] = 0.10; p_dhw_mensa[16] = 0.05
+
+        p_dhw_gym = np.zeros(24)
+        p_dhw_gym[9]  = 0.10; p_dhw_gym[10] = 0.20; p_dhw_gym[11] = 0.30
+        p_dhw_gym[12] = 0.50; p_dhw_gym[13] = 0.80; p_dhw_gym[14] = 0.20
+        p_dhw_gym[15] = 0.10; p_dhw_gym[16] = 0.10
+        if ev:
+            p_dhw_gym[17] = 0.20; p_dhw_gym[18] = 0.60; p_dhw_gym[19] = 0.90
+            p_dhw_gym[20] = 1.00; p_dhw_gym[21] = 0.60; p_dhw_gym[22] = 0.10
+
+        p_dhw_wash = np.zeros(24)
+        p_dhw_wash[8]  = 0.30; p_dhw_wash[9]  = 0.20; p_dhw_wash[10] = 0.50
+        p_dhw_wash[11] = 0.30; p_dhw_wash[12] = 0.60; p_dhw_wash[13] = 0.40
+        p_dhw_wash[14] = 0.20; p_dhw_wash[15] = 0.10; p_dhw_wash[16] = 0.10
+        p_dhw_wash[17] = 0.05
+
+        monthly_bd = dhw_result["monthly_breakdown"]
+        for i in range(8760):
+            if not school_days[i]:
+                continue
+            hod       = i % 24
+            m0        = _doy_to_month(i // 24) - 1   # 0-indexed
+            mb        = monthly_bd[m0]
+            m_total   = mb["mensa"] + mb["gym"] + mb["washroom"]
+            if m_total <= 0:
+                continue
+            mf = mb["mensa"]    / m_total
+            gf = mb["gym"]      / m_total
+            wf = mb["washroom"] / m_total
+            w_dhw[i]  = m_total * (
+                mf * p_dhw_mensa[hod] +
+                gf * p_dhw_gym[hod]   +
+                wf * p_dhw_wash[hod]
+            )
+
     return (
         lighting_Wh
-        + _dist(breakdown["computers"],  w_comp)
-        + _dist(breakdown["tech_lab"],   w_tech)
-        + _dist(breakdown["canteen"],    w_cant)
-        + _dist(breakdown["gym"],        w_gym)
-        + _dist(breakdown["admin"],      w_adm)
-        + _dist(breakdown["ac"],         w_ac)
-        + _dist(breakdown["heating_hp"], w_heat)
-        + _dist(breakdown["elevator"],   w_elev)
-        + _dist(breakdown["misc"],       w_misc)
+        + _dist(breakdown["computers"],       w_comp)
+        + _dist(breakdown["tech_lab"],        w_tech)
+        + _dist(breakdown["canteen"],         w_cant)
+        + _dist(breakdown["gym"],             w_gym)
+        + _dist(breakdown["admin"],           w_adm)
+        + _dist(breakdown["ac"],              w_ac)
+        + _dist(breakdown["heating_hp"],      w_heat)
+        + _dist(breakdown["elevator"],        w_elev)
+        + _dist(breakdown["misc"],            w_misc)
+        + _dist(breakdown.get("dhw", 0.0),   w_dhw)
     )
 
 
@@ -472,6 +602,18 @@ def calc_school_loads(
     # ── 10. Miscellaneous (servers, copiers, AV equipment, etc.) ─────────────
     misc_kwh = inp.floor_area_m2 * 2.5
 
+    # ── 11. Domestic Hot Water (ACS) ─────────────────────────────────────────
+    _dhw_result   = _calc_dhw_demand(inp, zone)
+    dhw_thermal   = _dhw_result["total_thermal_kwh"]
+    if inp.dhw_system == "electric":
+        dhw_electric = dhw_thermal / 0.95
+    elif inp.dhw_system == "heat_pump":
+        dhw_electric = dhw_thermal / 2.5
+    elif inp.dhw_system == "gas":
+        dhw_electric = dhw_thermal * 0.05   # solo circolatori elettrici
+    else:
+        dhw_electric = 0.0
+
     # ── Breakdown and total ───────────────────────────────────────────────────
     breakdown = {
         "lighting":   round(lighting_kwh,  1),
@@ -484,6 +626,7 @@ def calc_school_loads(
         "heating_hp": round(heating_kwh,    1),
         "elevator":   round(elevator_kwh,   1),
         "misc":       round(misc_kwh,       1),
+        "dhw":        round(dhw_electric,   1),
     }
     total_estimated = sum(breakdown.values())
 
@@ -528,7 +671,8 @@ def calc_school_loads(
             school_days_arr[_doy * 24:(_doy + 1) * 24] = True
 
     hourly_Wh = _build_category_profiles(
-        inp, breakdown, school_days_arr, heating_season, tmy_hourly_ghi
+        inp, breakdown, school_days_arr, heating_season, tmy_hourly_ghi,
+        dhw_result=_dhw_result,
     )
     hourly_Wh *= scale_factor
 
@@ -587,6 +731,22 @@ def calc_school_loads(
             "winter_vs_summer_ratio": round(ratio, 2),
         }
 
+    dhw_details = {
+        "total_thermal_kwh":  round(dhw_thermal, 1),
+        "total_electric_kwh": round(breakdown["dhw"], 1),
+        "mensa_kwh":          round(_dhw_result["mensa_kwh"], 1),
+        "gym_kwh":            round(_dhw_result["gym_kwh"], 1),
+        "washroom_kwh":       round(_dhw_result["washroom_kwh"], 1),
+        "dhw_system":         inp.dhw_system,
+        "standby_losses_pct": inp.dhw_standby_losses_pct,
+        "note": (
+            f"DHW via {inp.dhw_system}: "
+            f"mensa {_dhw_result['mensa_kwh']:,.0f} kWh_th, "
+            f"palestra {_dhw_result['gym_kwh']:,.0f} kWh_th, "
+            f"lavabi {_dhw_result['washroom_kwh']:,.0f} kWh_th"
+        ),
+    }
+
     return {
         "hourly_demand_Wh":             [round(float(v), 2) for v in hourly_Wh],
         "total_annual_kwh":             round(total_annual, 1),
@@ -601,6 +761,7 @@ def calc_school_loads(
         "electric_benchmark_kWh_m2":    round(electric_benchmark_kwh / inp.floor_area_m2, 1),
         "lighting_daylight_aware":      daylight_aware,
         "lighting_details":             lighting_details,
+        "dhw_details":                  dhw_details,
     }
 
 
@@ -659,6 +820,7 @@ def run_simulation_school(
     avg_W      = sum(hourly_Wh) / len(hourly_Wh) if hourly_Wh else 0.0
 
     # ── Build LoadsResult from school data ────────────────────────────────────
+    dhw_kwh = breakdown.get("dhw", 0.0)
     appliances_kwh = (
         breakdown["computers"] + breakdown["tech_lab"] + breakdown["canteen"]
         + breakdown["gym"] + breakdown["admin"] + breakdown["elevator"]
@@ -667,7 +829,7 @@ def run_simulation_school(
     total = total_kwh or 1.0
 
     loads_result = LoadsResult(
-        dhw_kWh                    = 0.0,
+        dhw_kWh                    = dhw_kwh,
         ventilation_kWh            = 0.0,
         lighting_kWh               = breakdown["lighting"],
         appliances_kWh             = appliances_kwh,
@@ -675,7 +837,7 @@ def run_simulation_school(
         hvac_cooling_kWh           = breakdown["ac"],
         hvac_auxiliary_kWh         = 0.0,
         total_annual_kWh           = round(total_kwh, 1),
-        dhw_monthly_kWh            = [0.0] * 12,
+        dhw_monthly_kWh            = [round(v * dhw_kwh / total, 1) for v in monthly],
         ventilation_monthly_kWh    = [0.0] * 12,
         lighting_monthly_kWh       = [round(v * breakdown["lighting"] / total, 1) for v in monthly],
         appliances_monthly_kWh     = [round(v * appliances_kwh / total, 1) for v in monthly],

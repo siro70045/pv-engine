@@ -725,6 +725,28 @@ def step_energy():
     )
     sset(lighting_type=light_opts[lt_lbl])
 
+    st.markdown('<div class="slbl">Hot water system</div>', unsafe_allow_html=True)
+    dhw_opts = {
+        "Electric water heater (boiler)": "electric",
+        "Heat pump water heater":         "heat_pump",
+        "Gas water heater":               "gas",
+        "No hot water / cold only":       "none",
+    }
+    prev_dhw = ss("dhw_system", "electric")
+    dhw_lbl  = st.selectbox(
+        "Hot water supply",
+        list(dhw_opts.keys()),
+        index=list(dhw_opts.values()).index(prev_dhw),
+        label_visibility="collapsed",
+    )
+    sset(dhw_system=dhw_opts[dhw_lbl])
+    if dhw_opts[dhw_lbl] != "none":
+        st.caption(
+            "Hot water is used by canteen (dishwashing), gym (showers), "
+            "and washrooms. Winter consumption is significantly higher "
+            "than summer due to colder inlet water and increased washroom usage."
+        )
+
     st.divider()
 
     # ── Electricity bills ─────────────────────────────────────────────────────
@@ -830,6 +852,7 @@ def step_energy():
             lighting_type     = ss("lighting_type", "fluorescent"),
             climate_zone      = ss("climate_zone", "E"),
             annual_bill_kwh   = float(total_el) if total_el > 0 else 0.0,
+            dhw_system        = ss("dhw_system", "electric"),
         )
         _tmy = ss("tmy_data")
         _tmy_ghi = [rec.G_h for rec in _tmy.hourly] if _tmy is not None else None
@@ -1360,6 +1383,29 @@ def step_results():
             for k, v in bd.items() if v > 0
         ]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        if loads_r.get("dhw_details"):
+            dhw = loads_r["dhw_details"]
+            if dhw.get("total_electric_kwh", 0) > 0:
+                st.markdown('<div class="slbl">Hot water breakdown</div>',
+                            unsafe_allow_html=True)
+                dhw_rows = []
+                if dhw["mensa_kwh"] > 0:
+                    dhw_rows.append({"Use": "Canteen (dishwashing)",
+                                     "kWh_th/yr": int(dhw["mensa_kwh"])})
+                if dhw["gym_kwh"] > 0:
+                    dhw_rows.append({"Use": "Gym showers",
+                                     "kWh_th/yr": int(dhw["gym_kwh"])})
+                if dhw["washroom_kwh"] > 0:
+                    dhw_rows.append({"Use": "Washrooms (seasonal)",
+                                     "kWh_th/yr": int(dhw["washroom_kwh"])})
+                if dhw_rows:
+                    st.dataframe(dhw_rows, use_container_width=True, hide_index=True)
+                st.caption(
+                    f"Thermal demand: {dhw['total_thermal_kwh']:,.0f} kWh_th/yr "
+                    f"(before system efficiency). System: {dhw['dhw_system']}. "
+                    f"Electric equivalent: {dhw['total_electric_kwh']:,.0f} kWh/yr."
+                )
 
         if loads_r.get("lighting_daylight_aware"):
             details = loads_r["lighting_details"]

@@ -32,6 +32,7 @@ from geocoding import (
 from buildings import fetch_buildings, polygon_area_m2, kwp_from_area
 from school.loads_school import SchoolLoadsInput, calc_school_loads, run_simulation_school
 from school.incentives_school import calc_school_incentives
+from school.calendar_it import region_from_coordinates, REGIONAL_CALENDARS
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG
@@ -543,6 +544,34 @@ def step_institution():
 
     st.divider()
 
+    # ── Region (school calendar) ──────────────────────────────────────────────
+    _auto_region = "emilia_romagna"
+    _c_lon = ss("center_lon")
+    if _lat and _c_lon:
+        _auto_region = region_from_coordinates(float(_lat), float(_c_lon))
+
+    _region_labels = {k: k.replace("_", " ").title() for k in REGIONAL_CALENDARS}
+    _prev_region   = ss("region", _auto_region)
+    if _prev_region not in _region_labels:
+        _prev_region = _auto_region
+
+    st.markdown('<div class="slbl">Regione (calendario scolastico)</div>', unsafe_allow_html=True)
+    region = st.selectbox(
+        "Regione",
+        list(_region_labels.keys()),
+        index=list(_region_labels.keys()).index(_prev_region),
+        format_func=lambda r: _region_labels[r],
+        label_visibility="collapsed",
+        help="Determina il calendario scolastico regionale (data inizio/fine, festività locali).",
+    )
+    sset(region=region)
+    if _lat and _c_lon and _auto_region != region:
+        st.caption(f"Regione rilevata automaticamente: **{_auto_region}** — sovrascritta con {region}.")
+    elif _lat and _c_lon:
+        st.caption(f"Rilevata automaticamente dalle coordinate.")
+
+    st.divider()
+
     c1, c2 = st.columns(2)
     with c1:
         is_public = st.toggle(
@@ -851,6 +880,7 @@ def step_energy():
             ac_type           = ac_type,
             lighting_type     = ss("lighting_type", "fluorescent"),
             climate_zone      = ss("climate_zone", "E"),
+            region            = ss("region", "emilia_romagna"),
             annual_bill_kwh   = float(total_el) if total_el > 0 else 0.0,
             dhw_system        = ss("dhw_system", "electric"),
         )

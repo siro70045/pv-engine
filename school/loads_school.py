@@ -80,6 +80,9 @@ class SchoolLoadsInput:
     # Zona climatica (DPR 412/93)
     climate_zone: str = "E"
 
+    # Regione (calendario scolastico)
+    region: str = "emilia_romagna"
+
     # ACS (acqua calda sanitaria)
     dhw_system: str = "electric"             # "electric" / "gas" / "heat_pump" / "none"
     dhw_standby_losses_pct: float = 0.15     # perdite accumulo/distribuzione
@@ -107,7 +110,7 @@ def _calc_dhw_demand(inp: "SchoolLoadsInput", climate_zone: str) -> dict:
     if climate_zone in ("A", "B", "C"):
         t_cold = [t + 2 for t in t_cold]
 
-    school_days = school_days_per_month(inp.school_type)
+    school_days = school_days_per_month(inp.school_type, region=inp.region)
 
     total_mensa    = 0.0
     total_gym      = 0.0
@@ -503,12 +506,15 @@ def _calc_internal_gains(inp: "SchoolLoadsInput") -> dict:
               + inp.n_ata_staff * 85)
 
     cal = build_school_calendar(
-        inp.school_type, inp.extra_evening, inp.extra_weekend, inp.full_time
+        inp.school_type, inp.extra_evening, inp.extra_weekend, inp.full_time,
+        region=inp.region,
     )
-    # Count gains only on actual school days — students/teachers are not
-    # present during guardiania (0.02) or summer ATA shifts (0.05).
+    _sd_set = {
+        doy for doy in range(365)
+        if sum(1 for v in cal[doy * 24:(doy + 1) * 24] if v > 0.5) >= 4
+    }
     hourly_gains_Wh = [
-        peak_W * frac if _is_school_day(h // 24, inp.school_type) else 0.0
+        peak_W * frac if (h // 24) in _sd_set else 0.0
         for h, frac in enumerate(cal)
     ]
     annual_gains_kWh = sum(hourly_gains_Wh) / 1000.0
@@ -542,7 +548,7 @@ def calc_school_loads(
         school_days_per_month list[int] — 12 values
         total_monthly_kwh     list[float] — 12 values
     """
-    school_days = school_days_per_month(inp.school_type)
+    school_days = school_days_per_month(inp.school_type, region=inp.region)
     total_school_days = sum(school_days)
 
     # ── Climate zone and heating season ──────────────────────────────────────
@@ -674,9 +680,14 @@ def calc_school_loads(
     total_annual = total_estimated * scale_factor
 
     # ── Build 8760-hour profile ───────────────────────────────────────────────
+    _regional_cal = build_school_calendar(
+        inp.school_type, inp.extra_evening, inp.extra_weekend, inp.full_time,
+        region=inp.region,
+    )
     school_days_arr = np.zeros(8760, dtype=bool)
     for _doy in range(365):
-        if _is_school_day(_doy, inp.school_type):
+        day_vals = _regional_cal[_doy * 24:(_doy + 1) * 24]
+        if sum(1 for v in day_vals if v > 0.5) >= 4:
             school_days_arr[_doy * 24:(_doy + 1) * 24] = True
 
     hourly_Wh = _build_category_profiles(

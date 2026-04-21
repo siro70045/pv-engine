@@ -83,6 +83,9 @@ class SchoolLoadsInput:
     # Regione (calendario scolastico)
     region: str = "emilia_romagna"
 
+    # Presenza effettiva
+    presence_factor: float = 0.87   # 0.85–0.90 tipico per scuole italiane
+
     # ACS (acqua calda sanitaria)
     dhw_system: str = "electric"             # "electric" / "gas" / "heat_pump" / "none"
     dhw_standby_losses_pct: float = 0.15     # perdite accumulo/distribuzione
@@ -124,10 +127,15 @@ def _calc_dhw_demand(inp: "SchoolLoadsInput", climate_zone: str) -> dict:
         # ── Mensa ────────────────────────────────────────────────────────────
         mensa_kwh = 0.0
         if inp.has_canteen and days > 0:
+            pf     = inp.presence_factor
+            pf_ata = max(pf, 0.95)
             if inp.full_time or inp.school_type == "primary":
-                meals_per_day = inp.n_students + inp.n_teachers + inp.n_ata_staff
+                meals_per_day = (inp.n_students * pf
+                                 + inp.n_teachers * pf
+                                 + inp.n_ata_staff * pf_ata)
             else:
-                meals_per_day = int(inp.n_students * 0.15) + inp.n_ata_staff
+                meals_per_day = (int(inp.n_students * pf) * 0.15
+                                 + inp.n_ata_staff * pf_ata)
             delta_t_mensa = 55 - tc
             factor_t      = delta_t_mensa / (55 - 14)
             mensa_kwh     = meals_per_day * days * 0.30 * factor_t
@@ -140,9 +148,9 @@ def _calc_dhw_demand(inp: "SchoolLoadsInput", climate_zone: str) -> dict:
         if inp.has_gym and days > 0:
             kwh_per_shower = 45 * (38 - tc) * 0.00116
 
-            # Uso scolastico: tasso base molto basso
+            # Uso scolastico: tasso base molto basso; scala con presenti
             base_rate = 0.08 if inp.extra_weekend else 0.03
-            school_showers = inp.n_students * base_rate * (days / 5)
+            school_showers = (inp.n_students * inp.presence_factor) * base_rate * (days / 5)
             gym_kwh = school_showers * kwh_per_shower
 
             # Uso serale da associazioni (3 sere/settimana × 12 docce/sera)
@@ -162,7 +170,11 @@ def _calc_dhw_demand(inp: "SchoolLoadsInput", climate_zone: str) -> dict:
             else:
                 wf = 0.3
             base_L = 0.7 if inp.construction_year >= 1990 else 0.3
-            total_people  = inp.n_students + inp.n_teachers + inp.n_ata_staff
+            pf     = inp.presence_factor
+            pf_ata = max(pf, 0.95)
+            total_people  = (inp.n_students * pf
+                             + inp.n_teachers * pf
+                             + inp.n_ata_staff * pf_ata)
             washroom_kwh  = total_people * days * base_L * wf * (40 - tc) * 0.00116
 
         total_mensa    += mensa_kwh
@@ -501,9 +513,11 @@ def _calc_internal_gains(inp: "SchoolLoadsInput") -> dict:
 
     Returns dict with hourly_gains_Wh, annual_gains_kWh, peak_gains_kW.
     """
-    peak_W = (inp.n_students * 70
-              + inp.n_teachers * 75
-              + inp.n_ata_staff * 85)
+    pf     = inp.presence_factor
+    pf_ata = max(pf, 0.95)
+    peak_W = (inp.n_students  * pf     * 70
+              + inp.n_teachers  * pf     * 75
+              + inp.n_ata_staff * pf_ata * 85)
 
     cal = build_school_calendar(
         inp.school_type, inp.extra_evening, inp.extra_weekend, inp.full_time,
@@ -782,6 +796,17 @@ def calc_school_loads(
         "lighting_daylight_aware":      daylight_aware,
         "lighting_details":             lighting_details,
         "dhw_details":                  dhw_details,
+        "presence_factor":              inp.presence_factor,
+        "effective_occupancy": {
+            "nominal_total":       inp.n_students + inp.n_teachers + inp.n_ata_staff,
+            "effective_total":     int(inp.n_students * inp.presence_factor
+                                       + inp.n_teachers * inp.presence_factor
+                                       + inp.n_ata_staff * max(inp.presence_factor, 0.95)),
+            "students_effective":  int(inp.n_students * inp.presence_factor),
+            "teachers_effective":  int(inp.n_teachers * inp.presence_factor),
+            "ata_effective":       int(inp.n_ata_staff * max(inp.presence_factor, 0.95)),
+            "factor_applied":      inp.presence_factor,
+        },
     }
 
 

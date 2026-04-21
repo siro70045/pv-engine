@@ -692,6 +692,51 @@ def step_occupancy():
     sset(extra_evening=extra_evening, extra_weekend=extra_weekend)
 
     st.divider()
+    st.markdown('<div class="slbl">Effective attendance</div>', unsafe_allow_html=True)
+    st.caption(
+        "Students are rarely 100% present: absences, school trips, field activities, "
+        "and occasional closures reduce the effective daily attendance. "
+        "This affects internal heat gains and hot water consumption."
+    )
+
+    _school_type_pf = ss("school_type", "high_tech")
+    _pf_defaults = {
+        "primary":      (0.90, "Primary schools have lower absences and fewer field trips."),
+        "middle":       (0.87, "Middle schools have typical Italian attendance patterns."),
+        "high_classic": (0.85, "High schools have more absences and external activities."),
+        "high_tech":    (0.82, "Technical institutes have PCTO/internship periods away from school."),
+        "university_dept": (0.80, "University departments have variable attendance."),
+    }
+    _default_pf, _pf_hint = _pf_defaults.get(_school_type_pf, (0.85, ""))
+    _prev_pf = ss("presence_factor", _default_pf)
+
+    presence_pct = st.slider(
+        "Effective attendance [%]",
+        min_value=70, max_value=100,
+        value=int(_prev_pf * 100),
+        step=1,
+        help=(
+            "Average percentage of enrolled students, teachers, and staff actually "
+            "present during school hours. 70% = very low (e.g. rural / post-pandemic), "
+            "95% = realistic maximum. Default varies by school type."
+        ),
+    )
+    presence_factor = presence_pct / 100.0
+    sset(presence_factor=presence_factor)
+    if _pf_hint:
+        st.caption(_pf_hint)
+
+    _n_s = ss("n_students", 300)
+    _n_t = ss("n_teachers", 25)
+    _n_a = ss("n_ata_staff", 10)
+    _eff  = int(_n_s * presence_factor + _n_t * presence_factor + _n_a * max(presence_factor, 0.95))
+    _nom  = _n_s + _n_t + _n_a
+    st.caption(
+        f"Nominal total occupants: {_nom}. "
+        f"Effective average present: ~{_eff} ({_eff / _nom * 100:.0f}%)."
+    )
+
+    st.divider()
     ca, cb = st.columns(2)
     with ca:
         if st.button("← Back", use_container_width=True): go_to(2)
@@ -881,6 +926,7 @@ def step_energy():
             lighting_type     = ss("lighting_type", "fluorescent"),
             climate_zone      = ss("climate_zone", "E"),
             region            = ss("region", "emilia_romagna"),
+            presence_factor   = ss("presence_factor", 0.87),
             annual_bill_kwh   = float(total_el) if total_el > 0 else 0.0,
             dhw_system        = ss("dhw_system", "electric"),
         )
@@ -1402,6 +1448,14 @@ def step_results():
         )
 
     # ── Breakdown table ────────────────────────────────────────────────────────
+    if loads_r.get("presence_factor", 1.0) < 1.0:
+        occ = loads_r.get("effective_occupancy", {})
+        if occ:
+            st.caption(
+                f"Consumption calculated with {occ['factor_applied']*100:.0f}% effective attendance: "
+                f"~{occ['effective_total']} average present (nominal: {occ['nominal_total']})."
+            )
+
     if loads_r.get("breakdown"):
         st.markdown("#### Estimated consumption breakdown")
         bd    = loads_r["breakdown"]

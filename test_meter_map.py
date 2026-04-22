@@ -106,6 +106,16 @@ def get_active_meter_name() -> str:
 
 # ── Sidebar panel ─────────────────────────────────────────────────────────────
 
+def get_next_meter_name() -> str:
+    existing = [m["name"] for m in st.session_state.meters]
+    n = st.session_state.next_meter_id
+    candidate = f"Meter {n}"
+    while candidate in existing:
+        n += 1
+        candidate = f"Meter {n}"
+    return candidate
+
+
 def render_sidebar_panel() -> None:
     st.markdown("### Electrical meters")
     st.caption(
@@ -151,7 +161,6 @@ def render_sidebar_panel() -> None:
                              use_container_width=True):
                     st.session_state.active_meter_id = meter["id"]
                     st.session_state.view_mode = "edit"
-                    st.rerun()
             with btn_cols[1]:
                 pv_label = "⚡ PV" if meter.get("is_pv_target") else "Set PV"
                 if st.button(pv_label, key=f"pv_{meter['id']}",
@@ -161,7 +170,6 @@ def render_sidebar_panel() -> None:
                         m["is_pv_target"] = (
                             m["id"] == meter["id"] and not currently_set
                         )
-                    st.rerun()
             with btn_cols[2]:
                 if st.button("🗑", key=f"del_{meter['id']}",
                              use_container_width=True):
@@ -170,8 +178,10 @@ def render_sidebar_panel() -> None:
                         if m["id"] != meter["id"]
                     ]
                     if st.session_state.active_meter_id == meter["id"]:
-                        st.session_state.active_meter_id = None
-                    st.rerun()
+                        st.session_state.active_meter_id = (
+                            st.session_state.meters[0]["id"]
+                            if st.session_state.meters else None
+                        )
 
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -183,26 +193,34 @@ def render_sidebar_panel() -> None:
     ):
         new_name = st.text_input(
             "Meter name",
-            value=f"Meter {st.session_state.next_meter_id}",
+            value=get_next_meter_name(),
             key="new_meter_name",
         )
         if st.button("Create meter", key="create_meter",
                      use_container_width=True, type="primary"):
-            used_colors = [m["color_hex"] for m in st.session_state.meters]
-            color_name, color_hex = get_next_color(used_colors)
-            new_meter = {
-                "id":          st.session_state.next_meter_id,
-                "name":        new_name,
-                "color_name":  color_name,
-                "color_hex":   color_hex,
-                "is_pv_target": len(st.session_state.meters) == 0,
-                "polygons":    [],
-            }
-            st.session_state.meters.append(new_meter)
-            st.session_state.active_meter_id = new_meter["id"]
-            st.session_state.next_meter_id += 1
-            st.session_state.view_mode = "edit"
-            st.rerun()
+            existing_names = [m["name"] for m in st.session_state.meters]
+            if not new_name.strip():
+                st.error("Meter name cannot be empty.")
+            elif new_name.strip() in existing_names:
+                st.error(
+                    f'A meter named "{new_name}" already exists. '
+                    f'Choose a different name.'
+                )
+            else:
+                used_colors = [m["color_hex"] for m in st.session_state.meters]
+                color_name, color_hex = get_next_color(used_colors)
+                new_meter = {
+                    "id":          st.session_state.next_meter_id,
+                    "name":        new_name.strip(),
+                    "color_name":  color_name,
+                    "color_hex":   color_hex,
+                    "is_pv_target": len(st.session_state.meters) == 0,
+                    "polygons":    [],
+                }
+                st.session_state.meters.append(new_meter)
+                st.session_state.active_meter_id = new_meter["id"]
+                st.session_state.next_meter_id += 1
+                st.session_state.view_mode = "edit"
 
     st.markdown("---")
 
@@ -215,7 +233,6 @@ def render_sidebar_panel() -> None:
         ):
             st.session_state.view_mode = "view_all"
             st.session_state.active_meter_id = None
-            st.rerun()
     with view_cols[1]:
         if st.button(
             "✏ Edit mode",
@@ -225,7 +242,6 @@ def render_sidebar_panel() -> None:
             st.session_state.view_mode = "edit"
             if st.session_state.meters and not st.session_state.active_meter_id:
                 st.session_state.active_meter_id = st.session_state.meters[0]["id"]
-            st.rerun()
 
     if st.session_state.meters:
         total_all = sum(
@@ -402,7 +418,10 @@ def render_map() -> None:
                 active_meter = get_active_meter()
                 if active_meter:
                     active_meter["polygons"] = drawings
-                    st.success(f"Saved {len(drawings)} building(s).")
+                    st.success(
+                        f"✓ Saved {len(drawings)} building(s) — "
+                        f"~{sum(calc_polygon_area_m2(p) for p in drawings):.0f} m² total"
+                    )
 
 
 # ── Page layout ───────────────────────────────────────────────────────────────
@@ -416,11 +435,11 @@ st.caption(
 
 col_map, col_panel = st.columns([3, 1])
 
-with col_panel:
-    render_sidebar_panel()
-
 with col_map:
     render_map()
+
+with col_panel:
+    render_sidebar_panel()
 
 # ── Validation summary ────────────────────────────────────────────────────────
 

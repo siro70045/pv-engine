@@ -9,8 +9,10 @@ Launch:
 """
 
 import json
+import math
 
 import folium
+import requests
 import streamlit as st
 from folium.plugins import Draw
 from streamlit_folium import st_folium
@@ -52,6 +54,40 @@ def init_state() -> None:
 
 
 init_state()
+
+
+# ── Area calculation ──────────────────────────────────────────────────────────
+
+def calc_polygon_area_m2(geojson_feature: dict) -> float:
+    """
+    Calcola l'area di un poligono GeoJSON in m².
+    Usa la formula di Shoelace su coordinate geografiche
+    convertite in metri (approssimazione piana valida per
+    edifici < 1 km²).
+
+    Il GeoJSON ha coordinate in formato [lon, lat].
+    """
+    try:
+        coords = geojson_feature["geometry"]["coordinates"][0]
+        if len(coords) < 3:
+            return 0.0
+
+        lat_avg = sum(c[1] for c in coords) / len(coords)
+        lat_to_m = 111320.0
+        lon_to_m = 111320.0 * math.cos(math.radians(lat_avg))
+
+        points = [(c[0] * lon_to_m, c[1] * lat_to_m) for c in coords]
+
+        n = len(points)
+        area = 0.0
+        for i in range(n - 1):
+            area += points[i][0] * points[i + 1][1]
+            area -= points[i + 1][0] * points[i][1]
+        area = abs(area) / 2.0
+
+        return area
+    except Exception:
+        return 0.0
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -100,7 +136,13 @@ def render_sidebar_panel() -> None:
                 )
             with col_b:
                 n_poly = len(meter.get("polygons", []))
-                st.caption(f"{n_poly} bldg")
+                total_area = sum(
+                    calc_polygon_area_m2(p) for p in meter.get("polygons", [])
+                )
+                if total_area > 0:
+                    st.caption(f"{n_poly} bldg · ~{total_area:.0f} m²")
+                else:
+                    st.caption(f"{n_poly} bldg")
 
             btn_cols = st.columns(3)
             with btn_cols[0]:
@@ -185,6 +227,27 @@ def render_sidebar_panel() -> None:
                 st.session_state.active_meter_id = st.session_state.meters[0]["id"]
             st.rerun()
 
+    if st.session_state.meters:
+        total_all = sum(
+            calc_polygon_area_m2(p)
+            for m in st.session_state.meters
+            for p in m.get("polygons", [])
+        )
+        pv_meter = next(
+            (m for m in st.session_state.meters if m.get("is_pv_target")), None
+        )
+        pv_area = (
+            sum(calc_polygon_area_m2(p) for p in pv_meter.get("polygons", []))
+            if pv_meter
+            else 0
+        )
+
+        st.markdown("---")
+        st.caption(
+            f"Total mapped area: ~{total_all:.0f} m²\n"
+            f"PV target roof: ~{pv_area:.0f} m²"
+        )
+
     with st.expander("🔍 Debug state"):
         st.json({
             "view_mode":       st.session_state.view_mode,
@@ -205,6 +268,43 @@ def render_map() -> None:
         else f"Editing: {get_active_meter_name()}"
     )
     st.markdown(f"### Map — {mode_label}")
+
+    col_search, col_btn = st.columns([4, 1])
+    with col_search:
+        search_query = st.text_input(
+            "Search address",
+            placeholder="Via Roma 1, Milano...",
+            label_visibility="collapsed",
+            key="address_search_input",
+        )
+    with col_btn:
+        do_search = st.button("🔍", key="address_search_btn")
+
+    if do_search and search_query:
+        try:
+            resp = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": search_query,
+                    "format": "json",
+                    "limit": 1,
+                    "countrycodes": "it",
+                },
+                headers={"User-Agent": "PVEngine-SchoolMap/1.0"},
+                timeout=5,
+            )
+            results = resp.json()
+            if results:
+                lat = float(results[0]["lat"])
+                lon = float(results[0]["lon"])
+                st.session_state.map_center = [lat, lon]
+                st.success(
+                    f"Found: {results[0].get('display_name', '').split(',')[0]}"
+                )
+            else:
+                st.warning("Address not found. Try a more specific search.")
+        except Exception as e:
+            st.warning(f"Search unavailable: {e}")
 
     m = folium.Map(
         location=st.session_state.map_center,
@@ -234,6 +334,12 @@ def render_map() -> None:
             fill_opacity, stroke_opacity = 0.15, 0.3
 
         for poly_data in meter["polygons"]:
+            area_m2 = calc_polygon_area_m2(poly_data)
+            tooltip_text = (
+                meter["name"]
+                + (" ⚡ PV" if meter.get("is_pv_target") else "")
+                + (f"\n~{area_m2:.0f} m²" if area_m2 > 0 else "")
+            )
             folium.GeoJson(
                 poly_data,
                 style_function=lambda x,
@@ -246,9 +352,7 @@ def render_map() -> None:
                     "fillOpacity": fo,
                     "opacity":   so,
                 },
-                tooltip=folium.Tooltip(
-                    meter["name"] + (" ⚡ PV" if meter.get("is_pv_target") else "")
-                ),
+                tooltip=folium.Tooltip(tooltip_text),
             ).add_to(m)
 
     # Draw control — only in edit mode with an active meter
@@ -269,13 +373,7 @@ def render_map() -> None:
                     "showArea": True,
                 },
                 "polyline":     False,
-                "rectangle": {
-                    "shapeOptions": {
-                        "color":       c,
-                        "fillColor":   c,
-                        "fillOpacity": 0.5,
-                    },
-                },
+                "rectangle":    False,
                 "circle":       False,
                 "marker":       False,
                 "circlemarker": False,
@@ -289,28 +387,22 @@ def render_map() -> None:
         width=None,
         height=600,
         returned_objects=["last_active_drawing", "all_drawings"],
-        key=f"map_{st.session_state.view_mode}_{st.session_state.active_meter_id}",
+        key="main_school_map",
     )
 
-    # Persist newly drawn polygon
-    if (
-        st.session_state.view_mode == "edit"
-        and st.session_state.active_meter_id
-        and map_data
-        and map_data.get("last_active_drawing")
-    ):
-        new_drawing   = map_data["last_active_drawing"]
-        active_meter  = get_active_meter()
-        new_coords_str = json.dumps(
-            new_drawing.get("geometry", {}).get("coordinates", [])
-        )
-        already_saved = any(
-            json.dumps(p.get("geometry", {}).get("coordinates", [])) == new_coords_str
-            for p in active_meter["polygons"]
-        )
-        if not already_saved:
-            active_meter["polygons"].append(new_drawing)
-            st.rerun()
+    if map_data and map_data.get("all_drawings"):
+        drawings = map_data["all_drawings"]
+        if drawings:
+            n_new = len(drawings)
+            if st.button(
+                f"💾 Save {n_new} drawn building(s) to {get_active_meter_name()}",
+                key="save_drawings",
+                type="primary",
+            ):
+                active_meter = get_active_meter()
+                if active_meter:
+                    active_meter["polygons"] = drawings
+                st.rerun()
 
 
 # ── Page layout ───────────────────────────────────────────────────────────────

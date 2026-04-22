@@ -402,7 +402,7 @@ def render_map() -> None:
                 active_meter = get_active_meter()
                 if active_meter:
                     active_meter["polygons"] = drawings
-                st.rerun()
+                    st.success(f"Saved {len(drawings)} building(s).")
 
 
 # ── Page layout ───────────────────────────────────────────────────────────────

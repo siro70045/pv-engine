@@ -107,15 +107,14 @@ def get_active_meter_name() -> str:
 # ── Sidebar panel ─────────────────────────────────────────────────────────────
 
 def get_next_meter_name() -> str:
-    existing = [m["name"] for m in st.session_state.meters]
     n = st.session_state.next_meter_id
-    candidate = f"Meter {n}"
-    while candidate in existing:
+    existing = [m["name"] for m in st.session_state.meters]
+    while f"Meter {n}" in existing:
         n += 1
-        candidate = f"Meter {n}"
-    return candidate
+    return f"Meter {n}"
 
 
+@st.fragment
 def render_sidebar_panel() -> None:
     st.markdown("### Electrical meters")
     st.caption(

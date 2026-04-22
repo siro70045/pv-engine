@@ -104,17 +104,16 @@ def get_active_meter_name() -> str:
     return meter["name"] if meter else "none"
 
 
-# ── Sidebar panel ─────────────────────────────────────────────────────────────
-
 def get_next_meter_name() -> str:
-    n = st.session_state.next_meter_id
+    n = len(st.session_state.meters) + 1
     existing = [m["name"] for m in st.session_state.meters]
     while f"Meter {n}" in existing:
         n += 1
     return f"Meter {n}"
 
 
-@st.fragment
+# ── Sidebar panel ─────────────────────────────────────────────────────────────
+
 def render_sidebar_panel() -> None:
     st.markdown("### Electrical meters")
     st.caption(
@@ -432,13 +431,13 @@ st.caption(
     "before integrating into the main app."
 )
 
-col_map, col_panel = st.columns([3, 1])
-
-with col_map:
-    render_map()
-
-with col_panel:
+# Sidebar nativa Streamlit — i widget nella sidebar non causano
+# re-render della mappa nell'area principale
+with st.sidebar:
     render_sidebar_panel()
+
+# Area principale — solo la mappa a full width
+render_map()
 
 # ── Validation summary ────────────────────────────────────────────────────────
 

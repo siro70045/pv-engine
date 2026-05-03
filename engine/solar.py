@@ -30,7 +30,7 @@ Standards / references
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 try:
@@ -47,6 +47,67 @@ from engine.pvgis_client import TMYResult, HourlyRecord
 # ══════════════════════════════════════════════════════════════════════════════
 # DATA STRUCTURES
 # ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class BuildingFootprint:
+    """
+    One roof / building / sub-area within a multi-building PV system.
+
+    Used when the PV installation spans multiple roofs (e.g. school
+    complex with separate gym, multiple buildings on the same plot,
+    or a single roof split into different orientations).
+
+    Parameters
+    ----------
+    name : str
+        Human-readable label, e.g. "Sede principale", "Palestra".
+    area_m2 : float
+        Roof area available for PV [m²].
+    azimuth_deg : float
+        Azimuth the panels face: 0 = North, 90 = East,
+        180 = South, 270 = West.
+    tilt_deg : float
+        Panel tilt from horizontal: 0 = flat, 90 = vertical.
+    usable_fraction : float
+        Fraction of `area_m2` actually usable for panels (excludes
+        chimneys, perimeter setbacks, technical access). Default 0.70.
+    polygon_coords : list[tuple[float, float]] | None
+        Optional list of (lat, lon) vertices of the roof polygon.
+        Reserved for future use (3D shading, frontend visualisation).
+        The engine does NOT use this field — pure pass-through.
+    """
+    name: str
+    area_m2: float
+    azimuth_deg: float
+    tilt_deg: float
+    usable_fraction: float = 0.70
+    polygon_coords: Optional[list[tuple[float, float]]] = None
+
+    @property
+    def peak_power_kWp(self) -> float:
+        """
+        Estimated peak DC power assuming 200 W/m² module density
+        (typical 400 Wp module ≈ 2 m²).
+        """
+        return self.area_m2 * self.usable_fraction * 0.20
+
+
+@dataclass
+class FootprintResult:
+    """
+    Per-footprint production breakdown — populated by simulate_pv_multi
+    and reported back in SolarResult.footprints_detail for multi-building
+    reports.
+    """
+    name: str
+    area_m2: float
+    peak_power_kWp: float
+    azimuth_deg: float
+    tilt_deg: float
+    production_annual_kWh: float
+    specific_yield_kWh_kWp: float
+    share_pct: float                # this footprint's share of total production
+
 
 @dataclass
 class PVSystem:
@@ -223,6 +284,11 @@ class SolarResult:
     # ── System info ───────────────────────────────────────────────────────────
     system_losses_detail: dict
     location_info: dict
+
+    # ── Multi-footprint breakdown ─────────────────────────────────────────────
+    # Empty list for legacy single-system simulate_pv() calls (backward
+    # compatible); populated by simulate_pv_multi() with one entry per footprint.
+    footprints_detail: list[FootprintResult] = field(default_factory=list)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1015,7 +1081,12 @@ def simulate_pv(
     use_pvlib: bool = True,
 ) -> SolarResult:
     """
-    Run a full 8 760-hour PV production simulation.
+    Run a full 8 760-hour PV production simulation for a single PV system.
+
+    This is the default single-footprint entry point — kept identical to
+    the legacy behaviour for backward compatibility. For installations
+    that span multiple roofs / orientations, use `simulate_pv_multi`,
+    which delegates to this function per footprint and aggregates.
 
     Parameters
     ----------
@@ -1066,6 +1137,209 @@ def simulate_pv(
         hourly = _simulate_standalone(tmy, system, mounting)
 
     return _aggregate(hourly, system, tmy)
+
+
+def simulate_pv_multi(
+    tmy: TMYResult,
+    footprints: list[BuildingFootprint],
+    system_template: PVSystem,
+    mounting: str = "open_rack",
+    use_pvlib: bool = True,
+) -> SolarResult:
+    """
+    Multi-footprint PV simulation: aggregates production across N roofs.
+
+    For each footprint, builds a per-footprint PVSystem by cloning
+    `system_template` and overriding `peak_power_kWp` / `tilt_deg` /
+    `azimuth_deg` from the footprint. Calls `simulate_pv()` per footprint,
+    then aggregates the hourly and annual results into a single SolarResult.
+
+    The default single-footprint path is `simulate_pv()` itself; this
+    function is the multi-footprint extension. Calling
+    `simulate_pv_multi(tmy, [fp], template)` with one footprint produces
+    a SolarResult identical to `simulate_pv(tmy, fp_system)` within
+    floating-point rounding (≤ 0.01% on annual production).
+
+    Aggregation rules
+    -----------------
+    Hourly:
+      * `P_ac_W`, `P_dc_W`, `P_gross_W`           — SUMMED across footprints
+      * `poa_global_W_m2`, `poa_direct_W_m2`,
+        `poa_diffuse_sky_W_m2`, `poa_diffuse_gnd_W_m2`,
+        `T_cell_celsius`                           — AREA-weighted average
+        (these are intensities, not energies)
+      * `solar_zenith_deg`, `solar_azimuth_deg`,
+        `month`, `day`, `hour`                     — taken from the first
+        sub-result (single TMY ⇒ identical for all footprints)
+      * `horizon_shaded`                           — boolean OR
+
+    Annual / monthly:
+      * `production_monthly_kWh`,
+        `production_annual_kWh`,
+        `gross_dc_kWh`, `horizon_shading_loss_kWh`,
+        `iam_loss_kWh`, `temperature_loss_kWh`,
+        `system_losses_kWh`, `inverter_loss_kWh`,
+        `clipping_loss_kWh`, `ac_wiring_loss_kWh`  — SUMMED
+      * `poa_monthly_kWh_m2`,
+        `T_cell_avg_monthly`                       — AREA-weighted average
+      * `specific_yield_kWh_kWp`                   — production_annual / Σ kWp
+      * `performance_ratio`                        — production / (POA_avg × Σ kWp)
+      * `capacity_factor`                          — production / (Σ kWp × 8760)
+
+    Aggregation choices documented above (rather than ricalcolare le loss
+    from the aggregated hourly arrays) keep each footprint's per-AOI /
+    per-T_cell physics intact: every footprint computes its own IAM and
+    temperature losses, which simply sum.
+
+    Parameters
+    ----------
+    tmy : TMYResult
+        Single TMY — all footprints share location and weather.
+    footprints : list[BuildingFootprint]
+        One or more roofs. Length must be >= 1.
+    system_template : PVSystem
+        Template cloned per footprint. Fields `peak_power_kWp`,
+        `tilt_deg`, `azimuth_deg` are OVERRIDDEN by the footprint values;
+        all other fields (efficiency, losses, dc_ac_ratio, IAM coeff,
+        degradation, ...) are inherited.
+    mounting, use_pvlib
+        Forwarded unchanged to `simulate_pv()`.
+
+    Returns
+    -------
+    SolarResult
+        Aggregated. `footprints_detail` carries per-footprint breakdown.
+    """
+    if len(footprints) < 1:
+        raise ValueError("simulate_pv_multi requires at least one footprint")
+
+    # Per-footprint sub-simulations
+    sub_results: list[SolarResult] = []
+    for fp in footprints:
+        fp_system = replace(
+            system_template,
+            peak_power_kWp = fp.peak_power_kWp,
+            tilt_deg       = fp.tilt_deg,
+            azimuth_deg    = fp.azimuth_deg,
+        )
+        sub_results.append(simulate_pv(tmy, fp_system, mounting, use_pvlib))
+
+    areas       = [fp.area_m2 for fp in footprints]
+    total_area  = sum(areas) if sum(areas) > 0 else 1.0   # avoid /0
+    total_kWp   = sum(fp.peak_power_kWp for fp in footprints)
+    n_hours     = len(sub_results[0].hourly)
+
+    # ── Hourly aggregation ─────────────────────────────────────────────────
+    hourly_agg: list[HourlySolarResult] = []
+    for i in range(n_hours):
+        sub_h = [r.hourly[i] for r in sub_results]
+        # Sums (energy/power)
+        p_ac_sum    = sum(h.P_ac_W   for h in sub_h)
+        p_dc_sum    = sum(h.P_dc_W   for h in sub_h)
+        p_gross_sum = sum(h.P_gross_W for h in sub_h)
+        # Area-weighted means (irradiance, temperature)
+        poa_g  = sum(h.poa_global_W_m2     * a for h, a in zip(sub_h, areas)) / total_area
+        poa_d  = sum(h.poa_direct_W_m2     * a for h, a in zip(sub_h, areas)) / total_area
+        poa_sd = sum(h.poa_diffuse_sky_W_m2 * a for h, a in zip(sub_h, areas)) / total_area
+        poa_gd = sum(h.poa_diffuse_gnd_W_m2 * a for h, a in zip(sub_h, areas)) / total_area
+        t_cell = sum(h.T_cell_celsius      * a for h, a in zip(sub_h, areas)) / total_area
+        # Identical or simple boolean
+        first  = sub_h[0]
+        shaded = any(h.horizon_shaded for h in sub_h)
+        hourly_agg.append(HourlySolarResult(
+            month                = first.month,
+            day                  = first.day,
+            hour                 = first.hour,
+            solar_zenith_deg     = first.solar_zenith_deg,
+            solar_azimuth_deg    = first.solar_azimuth_deg,
+            poa_global_W_m2      = poa_g,
+            poa_direct_W_m2      = poa_d,
+            poa_diffuse_sky_W_m2 = poa_sd,
+            poa_diffuse_gnd_W_m2 = poa_gd,
+            horizon_shaded       = shaded,
+            T_cell_celsius       = t_cell,
+            P_dc_W               = p_dc_sum,
+            P_ac_W               = p_ac_sum,
+            P_gross_W            = p_gross_sum,
+        ))
+
+    # ── Monthly aggregation ────────────────────────────────────────────────
+    prod_m = [
+        sum(r.production_monthly_kWh[m] for r in sub_results)
+        for m in range(12)
+    ]
+    poa_m = [
+        sum(r.poa_monthly_kWh_m2[m] * a for r, a in zip(sub_results, areas)) / total_area
+        for m in range(12)
+    ]
+    tcell_m = [
+        sum(r.T_cell_avg_monthly[m] * a for r, a in zip(sub_results, areas)) / total_area
+        for m in range(12)
+    ]
+
+    # ── Annual & loss waterfall (sum of sub-results) ───────────────────────
+    prod_annual    = sum(r.production_annual_kWh for r in sub_results)
+    gross_dc       = sum(r.gross_dc_kWh           for r in sub_results)
+    horizon_loss   = sum(r.horizon_shading_loss_kWh for r in sub_results)
+    iam_loss       = sum(r.iam_loss_kWh           for r in sub_results)
+    temp_loss      = sum(r.temperature_loss_kWh   for r in sub_results)
+    sys_dc_loss    = sum(r.system_losses_kWh      for r in sub_results)
+    inverter_loss  = sum(r.inverter_loss_kWh      for r in sub_results)
+    clipping_loss  = sum(r.clipping_loss_kWh      for r in sub_results)
+    ac_wiring_loss = sum(r.ac_wiring_loss_kWh     for r in sub_results)
+
+    poa_annual    = sum(poa_m)
+    spec_yield    = prod_annual / total_kWp if total_kWp > 0 else 0.0
+    PR            = (prod_annual / (poa_annual * total_kWp)
+                     if poa_annual * total_kWp > 0 else 0.0)
+    CF            = prod_annual / (total_kWp * 8760) if total_kWp > 0 else 0.0
+
+    # ── Per-footprint breakdown ────────────────────────────────────────────
+    fp_detail: list[FootprintResult] = []
+    for fp, sub in zip(footprints, sub_results):
+        share = (sub.production_annual_kWh / prod_annual * 100.0
+                 if prod_annual > 0 else 0.0)
+        spec  = (sub.production_annual_kWh / fp.peak_power_kWp
+                 if fp.peak_power_kWp > 0 else 0.0)
+        fp_detail.append(FootprintResult(
+            name                   = fp.name,
+            area_m2                = fp.area_m2,
+            peak_power_kWp         = fp.peak_power_kWp,
+            azimuth_deg            = fp.azimuth_deg,
+            tilt_deg               = fp.tilt_deg,
+            production_annual_kWh  = sub.production_annual_kWh,
+            specific_yield_kWh_kWp = round(spec, 1),
+            share_pct              = round(share, 2),
+        ))
+
+    loc = tmy.location
+    return SolarResult(
+        hourly                   = hourly_agg,
+        production_monthly_kWh   = [round(v, 1) for v in prod_m],
+        poa_monthly_kWh_m2       = [round(v, 1) for v in poa_m],
+        T_cell_avg_monthly       = [round(v, 1) for v in tcell_m],
+        production_annual_kWh    = round(prod_annual, 1),
+        specific_yield_kWh_kWp   = round(spec_yield, 1),
+        performance_ratio        = round(PR, 3),
+        capacity_factor          = round(CF, 4),
+        gross_dc_kWh             = round(gross_dc, 1),
+        horizon_shading_loss_kWh = round(horizon_loss, 1),
+        iam_loss_kWh             = round(iam_loss, 1),
+        temperature_loss_kWh     = round(temp_loss, 1),
+        system_losses_kWh        = round(sys_dc_loss, 1),
+        inverter_loss_kWh        = round(inverter_loss, 1),
+        clipping_loss_kWh        = round(clipping_loss, 1),
+        ac_wiring_loss_kWh       = round(ac_wiring_loss, 1),
+        system_losses_detail     = system_template.system_losses.summary(),
+        location_info            = {
+            "latitude":    loc.latitude,
+            "longitude":   loc.longitude,
+            "elevation_m": loc.elevation_m,
+            "country":     loc.country,
+            "dataset":     loc.dataset,
+        },
+        footprints_detail        = fp_detail,
+    )
 
 
 def print_solar_summary(result: SolarResult, system: PVSystem) -> None:

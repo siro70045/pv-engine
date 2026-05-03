@@ -50,6 +50,7 @@ from engine.economics import (
     InvestmentCost, OperatingCost, FinancialParameters,
     ItalianIncentives, EconomicsResult, calc_economics,
 )
+from engine.solar import BuildingFootprint
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -76,6 +77,20 @@ class ScenarioConfig:
         building_profile, pv_production_hourly_Wh, base_demand_hourly_Wh
 
     Everything else has sensible defaults.
+
+    PV sizing — single vs multi-footprint
+    -------------------------------------
+    The default (backward compatible) single-footprint mode uses
+    `pv_peak_kWp` as the installed kWp; the caller supplies
+    `pv_production_hourly_Wh` from `solar.simulate_pv()`.
+
+    For multi-building installations (e.g. school complex with several
+    roofs / orientations), the caller can additionally set
+    `pv_footprints = [BuildingFootprint(...), ...]` and supply an
+    aggregated `pv_production_hourly_Wh` from `solar.simulate_pv_multi()`.
+    When `pv_footprints` is provided, `total_pv_kWp` is derived from
+    the sum of footprint capacities and `pv_peak_kWp` is ignored
+    (a warning is emitted from `compare_scenarios` if both are set).
     """
     # ── Energy profiles ────────────────────────────────────────────────────
     building_profile: BuildingEnergyProfile
@@ -90,6 +105,12 @@ class ScenarioConfig:
 
     # ── PV and battery ────────────────────────────────────────────────────
     pv_peak_kWp: float = 0.0
+    pv_footprints: Optional[list[BuildingFootprint]] = None
+    # Optional multi-footprint metadata. When non-empty, `total_pv_kWp`
+    # returns the sum of footprint capacities (for CAPEX and energy
+    # balance sizing) and `pv_peak_kWp` is ignored. Pass-through only —
+    # the caller is responsible for computing the PV production curve
+    # via `solar.simulate_pv_multi()`.
     battery: BatterySystem = field(default_factory=lambda: BatterySystem(capacity_kWh=0))
     tariff: GridTariff = field(default_factory=GridTariff)
     pv_degradation_pct_per_yr: float = 0.50
@@ -126,6 +147,17 @@ class ScenarioConfig:
             dhw_frac = self.building_profile.gas_system.dhw_fraction
             return self.building_profile.annual_gas_thermal_kWh * (1.0 - dhw_frac)
         return 0.0
+
+    @property
+    def total_pv_kWp(self) -> float:
+        """
+        Installed PV capacity [kWp] used for CAPEX and energy-balance sizing.
+        Sum of footprint capacities when `pv_footprints` is provided,
+        otherwise the legacy `pv_peak_kWp`.
+        """
+        if self.pv_footprints:
+            return sum(fp.peak_power_kWp for fp in self.pv_footprints)
+        return self.pv_peak_kWp
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -429,6 +461,14 @@ def compare_scenarios(
     bp = cfg.building_profile
     scenarios: dict[str, SingleScenarioResult] = {}
 
+    # Surface anomalous double-spec early — pv_footprints wins.
+    if cfg.pv_footprints and cfg.pv_peak_kWp > 0:
+        import warnings
+        warnings.warn(
+            "ScenarioConfig: pv_footprints provided — pv_peak_kWp ignored.",
+            stacklevel=2,
+        )
+
     # ── Baseline ──────────────────────────────────────────────────────────
     baseline = _compute_baseline(cfg)
     scenarios[SCENARIO_BASELINE] = baseline
@@ -494,7 +534,7 @@ def compare_scenarios(
             demand_hourly_Wh        = demand_Wh,
             battery                 = cfg.battery,
             tariff                  = cfg.tariff,
-            peak_power_kWp          = cfg.pv_peak_kWp,
+            peak_power_kWp          = cfg.total_pv_kWp,
         )
         yearly = simulate_lifetime(eb_inp, lifetime_years, cfg.pv_degradation_pct_per_yr)
         eb1 = yearly[0]
@@ -561,9 +601,9 @@ def compare_scenarios(
         )
 
     # ── Solo FV ──────────────────────────────────────────────────────────
-    if cfg.run_solo_pv and cfg.pv_peak_kWp > 0:
+    if cfg.run_solo_pv and cfg.total_pv_kWp > 0:
         inv_pv = cfg.investment_pv
-        inv_pv.peak_power_kWp = cfg.pv_peak_kWp
+        inv_pv.peak_power_kWp = cfg.total_pv_kWp
         opex_pv = cfg.opex_pv
         scenarios[SCENARIO_SOLO_PV] = _run_pv_scenario(
             SCENARIO_SOLO_PV, "Solo FV",
@@ -698,14 +738,14 @@ def compare_scenarios(
         )
 
     # ── FV + HP (monovalente) ─────────────────────────────────────────────
-    if cfg.run_pv_hp and hp_result_year1 and cfg.pv_peak_kWp > 0:
+    if cfg.run_pv_hp and hp_result_year1 and cfg.total_pv_kWp > 0:
         hp_demand_Wh = hp_result_year1.hp_electricity_profile_Wh
         combined = _combine_demands(cfg.base_demand_hourly_Wh, hp_demand_Wh)
         hp_capex = cfg.heat_pump.total_installed_cost_eur(hp_rated_kW)
 
         inv_combined = InvestmentCost(
             pv_cost_eur_kWp       = cfg.investment_pv.pv_cost_eur_kWp,
-            peak_power_kWp        = cfg.pv_peak_kWp,
+            peak_power_kWp        = cfg.total_pv_kWp,
             battery_cost_eur_kWh  = cfg.investment_pv.battery_cost_eur_kWh,
             battery_capacity_kWh  = cfg.battery.capacity_kWh,
             design_and_permits_eur= cfg.investment_pv.design_and_permits_eur + hp_capex * 0.03,
@@ -729,7 +769,7 @@ def compare_scenarios(
         )
 
     # ── FV + HP bivalente ─────────────────────────────────────────────────
-    if (cfg.run_pv_hp_bivalente and cfg.bivalent and cfg.pv_peak_kWp > 0
+    if (cfg.run_pv_hp_bivalente and cfg.bivalent and cfg.total_pv_kWp > 0
             and heating_kWh > 0):
         h_tr = calc_h_tr_from_annual(heating_kWh, cfg.t_ext_hourly)
         thermal_demand_Wh_biv = calc_hourly_thermal_demand(
@@ -748,7 +788,7 @@ def compare_scenarios(
         )
         inv_biv = InvestmentCost(
             pv_cost_eur_kWp       = cfg.investment_pv.pv_cost_eur_kWp,
-            peak_power_kWp        = cfg.pv_peak_kWp,
+            peak_power_kWp        = cfg.total_pv_kWp,
             battery_cost_eur_kWh  = cfg.investment_pv.battery_cost_eur_kWh,
             battery_capacity_kWh  = cfg.battery.capacity_kWh,
             design_and_permits_eur= cfg.investment_pv.design_and_permits_eur + hp_capex_biv * 0.03,

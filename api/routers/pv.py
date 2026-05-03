@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
+from api.utils.limiter import limiter
 from api.schemas.pv import (
     PVProductionRequest, PVProductionResponse,
     PVCostRequest, PVCostResponse,
@@ -24,7 +25,8 @@ router = APIRouter(prefix="/pv", tags=["pv"])
 
 @router.post("/production", response_model=PVProductionResponse,
              summary="Run PV simulation for a given system at a location")
-async def production(req: PVProductionRequest) -> PVProductionResponse:
+@limiter.limit("20/minute")
+async def production(request: Request, req: PVProductionRequest) -> PVProductionResponse:
     try:
         tmy, cached = get_cached_tmy(req.lat, req.lon)
     except PVGISError as e:

@@ -118,6 +118,73 @@ class TMYResult:
     hourly: list[HourlyRecord]
     monthly: MonthlyClimate
 
+    def to_dict(self) -> dict:
+        """Serialise to a JSON-friendly dict (matches `_tmy_from_dict`)."""
+        return {
+            "location": {
+                "latitude": self.location.latitude,
+                "longitude": self.location.longitude,
+                "elevation_m": self.location.elevation_m,
+                "country": self.location.country,
+                "dataset": self.location.dataset,
+                "horizon_profile": list(self.location.horizon_profile),
+            },
+            "hourly": [
+                {
+                    "month": h.month, "day": h.day, "hour": h.hour,
+                    "T2m": h.T2m, "RH": h.RH, "G_h": h.G_h,
+                    "Gb_n": h.Gb_n, "Gd_h": h.Gd_h, "IR_h": h.IR_h,
+                    "WS10m": h.WS10m, "WD10m": h.WD10m, "SP": h.SP,
+                }
+                for h in self.hourly
+            ],
+            "monthly": {
+                "T_avg":       list(self.monthly.T_avg),
+                "T_min":       list(self.monthly.T_min),
+                "T_max":       list(self.monthly.T_max),
+                "GHI_monthly": list(self.monthly.GHI_monthly),
+                "DNI_monthly": list(self.monthly.DNI_monthly),
+                "DHI_monthly": list(self.monthly.DHI_monthly),
+                "WS_avg":      list(self.monthly.WS_avg),
+                "RH_avg":      list(self.monthly.RH_avg),
+            },
+        }
+
+
+def _tmy_from_dict(data: dict) -> TMYResult:
+    """Inverse of `TMYResult.to_dict` — used by the API-layer disk cache."""
+    loc = data["location"]
+    location = PVGISLocation(
+        latitude=float(loc["latitude"]),
+        longitude=float(loc["longitude"]),
+        elevation_m=float(loc.get("elevation_m", 0.0)),
+        country=str(loc.get("country", "unknown")),
+        dataset=str(loc.get("dataset", "unknown")),
+        horizon_profile=[float(v) for v in loc.get("horizon_profile", [])],
+    )
+    hourly = [
+        HourlyRecord(
+            month=int(h["month"]), day=int(h["day"]), hour=int(h["hour"]),
+            T2m=float(h["T2m"]), RH=float(h["RH"]),
+            G_h=float(h["G_h"]), Gb_n=float(h["Gb_n"]), Gd_h=float(h["Gd_h"]),
+            IR_h=float(h["IR_h"]), WS10m=float(h["WS10m"]),
+            WD10m=float(h["WD10m"]), SP=float(h["SP"]),
+        )
+        for h in data["hourly"]
+    ]
+    m = data["monthly"]
+    monthly = MonthlyClimate(
+        T_avg=[float(v) for v in m["T_avg"]],
+        T_min=[float(v) for v in m["T_min"]],
+        T_max=[float(v) for v in m["T_max"]],
+        GHI_monthly=[float(v) for v in m["GHI_monthly"]],
+        DNI_monthly=[float(v) for v in m["DNI_monthly"]],
+        DHI_monthly=[float(v) for v in m["DHI_monthly"]],
+        WS_avg=[float(v) for v in m["WS_avg"]],
+        RH_avg=[float(v) for v in m["RH_avg"]],
+    )
+    return TMYResult(location=location, hourly=hourly, monthly=monthly)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CACHE HELPERS

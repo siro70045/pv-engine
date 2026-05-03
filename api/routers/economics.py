@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
 from api.schemas.economics import (
     EnergyBalanceRequest, EnergyBalanceResponse,
@@ -238,7 +238,7 @@ async def incentive_school(req: IncentiveSchoolRequest) -> IncentiveSchoolRespon
 
 @router.post("/scenario-comparison", response_model=ScenarioComparisonResponse,
              summary="Multi-scenario gas/HP comparison (delegates to engine pipeline)")
-async def scenario_comparison(req: ScenarioComparisonRequest) -> ScenarioComparisonResponse:
+async def scenario_comparison(request: Request, req: ScenarioComparisonRequest) -> ScenarioComparisonResponse:
     from api.routers.simulate import simulate as run_full_simulate
     try:
         sim_req = FullSimulationRequest(**req.simulation_request)
@@ -249,7 +249,7 @@ async def scenario_comparison(req: ScenarioComparisonRequest) -> ScenarioCompari
     # Force gas on so the engine runs the full scenario set
     sim_req.gas_system.has_gas = True
 
-    sim_resp = await run_full_simulate(sim_req)
+    sim_resp = await run_full_simulate(request, sim_req)
     sc = sim_resp.scenario_comparison
     if sc is None:
         raise HTTPException(

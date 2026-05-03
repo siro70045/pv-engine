@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
+from api.utils.limiter import limiter
 from api.schemas.loads import (
     ResidentialLoadsRequest, ResidentialLoadsResponse,
     SchoolLoadsRequest, SchoolLoadsResponse,
@@ -174,7 +175,8 @@ def _school_inputs(req: SchoolLoadsRequest) -> SchoolLoadsInput:
 
 @router.post("/school", response_model=SchoolLoadsResponse,
              summary="School 8760-h load profile (calc_school_loads)")
-async def school_loads(req: SchoolLoadsRequest) -> SchoolLoadsResponse:
+@limiter.limit("20/minute")
+async def school_loads(request: Request, req: SchoolLoadsRequest) -> SchoolLoadsResponse:
     tmy_ghi = None
     if req.lat is not None and req.lon is not None:
         try:

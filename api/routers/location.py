@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
+from api.utils.limiter import limiter
 from api.schemas.location import (
     GeocodeRequest,
     GeocodeResponse,
@@ -44,7 +45,8 @@ async def health() -> dict:
 
 
 @router.post("/geocode", response_model=GeocodeResponse, summary="Address → coordinates")
-async def geocode(req: GeocodeRequest) -> GeocodeResponse:
+@limiter.limit("60/minute")
+async def geocode(request: Request, req: GeocodeRequest) -> GeocodeResponse:
     try:
         results = run_geocode(req.query, country_codes="it", limit=req.limit)
     except GeocodingError as e:
@@ -76,7 +78,8 @@ async def azimuth(req: AzimuthRequest) -> AzimuthResponse:
 
 
 @router.post("/tmy", response_model=TMYResponse, summary="PVGIS TMY summary (no hourly)")
-async def tmy_summary(req: LatLonRequest) -> TMYResponse:
+@limiter.limit("30/minute")
+async def tmy_summary(request: Request, req: LatLonRequest) -> TMYResponse:
     try:
         tmy, was_cached = get_cached_tmy(req.lat, req.lon)
     except PVGISError as e:
@@ -102,7 +105,8 @@ async def tmy_summary(req: LatLonRequest) -> TMYResponse:
 
 @router.post("/tmy/hourly", response_model=TMYHourlyResponse,
              summary="PVGIS hourly arrays (8760 GHI + temperature)")
-async def tmy_hourly(req: LatLonRequest) -> TMYHourlyResponse:
+@limiter.limit("10/minute")
+async def tmy_hourly(request: Request, req: LatLonRequest) -> TMYHourlyResponse:
     try:
         tmy, _ = get_cached_tmy(req.lat, req.lon)
     except PVGISError as e:

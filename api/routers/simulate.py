@@ -13,7 +13,9 @@ import sys
 import traceback
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
+
+from api.utils.limiter import limiter
 
 # Re-use the legacy adapter logic so we stay bug-for-bug compatible
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -33,7 +35,8 @@ router = APIRouter(prefix="/simulate", tags=["simulate"])
 
 @router.post("", response_model=FullSimulationResponse,
              summary="Run a complete PV feasibility simulation (legacy contract)")
-async def simulate(req: FullSimulationRequest) -> FullSimulationResponse:
+@limiter.limit("10/minute")
+async def simulate(request: Request, req: FullSimulationRequest) -> FullSimulationResponse:
     """Delegates to `api_legacy.simulate` — same engine, same response shape."""
     from api_legacy import _request_to_simulation_input, _result_to_response
     from main import run_simulation, result_to_dict
@@ -56,7 +59,8 @@ async def simulate(req: FullSimulationRequest) -> FullSimulationResponse:
 
 @router.post("/school", response_model=FullSchoolSimulationResponse,
              summary="Run a complete school PV feasibility simulation")
-async def simulate_school(req: FullSchoolSimulationRequest) -> FullSchoolSimulationResponse:
+@limiter.limit("10/minute")
+async def simulate_school(request: Request, req: FullSchoolSimulationRequest) -> FullSchoolSimulationResponse:
     from api.schemas.loads import SchoolLoadsRequest
     from api.routers.loads import _school_inputs
     from school.loads_school import calc_school_loads, run_simulation_school

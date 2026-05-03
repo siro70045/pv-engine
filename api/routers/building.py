@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
+from api.utils.limiter import limiter
 from api.schemas.building import (
     OSMBuildingRequest, OSMBuildingResponse, OSMBuilding,
     RoofEstimateRequest, RoofEstimateResponse,
@@ -21,7 +22,8 @@ router = APIRouter(prefix="/building", tags=["building"])
 
 @router.post("/osm-nearby", response_model=OSMBuildingResponse,
              summary="Fetch OSM building polygons within a radius")
-async def osm_nearby(req: OSMBuildingRequest) -> OSMBuildingResponse:
+@limiter.limit("30/minute")
+async def osm_nearby(request: Request, req: OSMBuildingRequest) -> OSMBuildingResponse:
     try:
         polys = fetch_buildings(req.lat, req.lon, radius_m=req.radius_m)
     except Exception as e:   # broad: Overpass network failure is non-critical

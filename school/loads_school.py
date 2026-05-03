@@ -35,6 +35,22 @@ from school.climate_zones import (
 )
 
 
+# Day-of-week factors for thermal loads (heating + cooling)
+# Pattern: Monday peak (building thermally drifted during weekend),
+#          Friday afternoon flush (typical Italian school HVAC practice)
+# Source: calibrated on ENEA Rapporto Annuale Efficienza Energetica
+#         observations of Italian school consumption profiles
+# Constraint: sum = 5.0 → weekly average = 1.0
+#             (redistribution only, no net energy added or removed)
+_DOW_FACTORS_THERMAL = {
+    0: 1.15,  # Monday
+    1: 1.02,  # Tuesday
+    2: 1.00,  # Wednesday
+    3: 0.98,  # Thursday
+    4: 0.85,  # Friday
+}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # INPUT DATACLASS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -214,6 +230,12 @@ def _build_category_profiles(
 
     school_days: 8760-element bool array, True if that hour is a school day.
     heating_season: (start_month, end_month) from get_heating_season().
+
+    Thermal loads (w_heat, w_ac) are modulated by day-of-week using
+    `_DOW_FACTORS_THERMAL` (Mon peak, Fri trough) to reflect building
+    thermal inertia after weekends and pre-weekend setpoint flush. Non-thermal
+    loads remain governed by occupancy/schedule and are not modulated.
+    Final `_dist()` normalization preserves the annual kWh budget per category.
     """
     ev = inp.extra_evening
     ew = inp.extra_weekend
@@ -333,6 +355,7 @@ def _build_category_profiles(
             ac_active = True
 
         if is_school:
+            dow_factor_thermal = _DOW_FACTORS_THERMAL.get(dow, 1.0)
             w_light[base:base+24] = p_light
             w_comp[base:base+24]  = p_comp
             w_tech[base:base+24]  = p_tech
@@ -341,8 +364,8 @@ def _build_category_profiles(
             w_adm[base:base+24]   = p_adm
             w_elev[base:base+24]  = p_elev
             w_misc[base:base+24]  = p_misc
-            w_ac[base:base+24]    = p_ac   if ac_active   else 0.0
-            w_heat[base:base+24]  = p_heat if heat_active else 0.0
+            w_ac[base:base+24]    = (p_ac   * dow_factor_thermal) if ac_active   else 0.0
+            w_heat[base:base+24]  = (p_heat * dow_factor_thermal) if heat_active else 0.0
 
         elif is_summer:
             # Only servers (misc × 0.15) + AC if active; everything else minimal

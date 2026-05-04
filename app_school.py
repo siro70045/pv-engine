@@ -33,17 +33,14 @@ from buildings import fetch_buildings, polygon_area_m2, kwp_from_area
 from school.loads_school import SchoolLoadsInput, calc_school_loads, run_simulation_school
 from school.incentives_school import calc_school_incentives
 from school.calendar_it import region_from_coordinates, REGIONAL_CALENDARS
+from branding.meridiana_theme import apply_meridiana_theme, render_header
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.set_page_config(
-    page_title="PV Engine — Scuole",
-    page_icon="🏫",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+apply_meridiana_theme(page_title="Meridiana — Scuole")
+render_header(subtitle="Simulatore scuole italiane")
 
 MESI = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 STEPS = ["Location","Institution","Occupancy","Energy","System","Results"]

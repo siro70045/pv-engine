@@ -32,17 +32,14 @@ from geocoding import (
     GeocodingError,
 )
 from buildings import fetch_buildings, polygon_area_m2, kwp_from_area
+from branding.meridiana_theme import apply_meridiana_theme, render_header
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.set_page_config(
-    page_title="PV Engine",
-    page_icon="☀️",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+apply_meridiana_theme(page_title="Meridiana — Residenziale")
+render_header(subtitle="Simulatore residenziale")
 
 MESI = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 STEPS = ["Location","Building","Bills","System","Results"]

@@ -37,6 +37,52 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2. Streamlit (`app.py` + `app_school.p
 - Discrepanza ~10% tra produzione Borzano 100 kWp simulata (131.763 kWh/anno motore standalone, no pvlib) vs valore dichiarato nei banner sito/PDF (~120.000 kWh/anno). Da risolvere prima del lancio settembre 2026 con pvlib in produzione Railway.
 - Variabile Railway `ENVIRONMENT=production` non ancora impostata (cosmetico).
 
+- Critiche per la correttezza del motore
+1. _REF_EFFICIENCY: float = 0.90 come campo dataclass invece di ClassVar (energy_vectors.py:206)
+Questo è un bug Python sottile ma reale: in una @dataclass, una variabile dichiarata senza ClassVar viene inclusa nel costruttore e nei comparison. Significa che ogni istanza ha la sua copia di _REF_EFFICIENCY e che __eq__ controlla anche quel campo. Probabilmente per ora non causa errori visibili perché il default è uguale ovunque, ma se un giorno qualcuno passasse un valore custom, il comportamento sarebbe imprevedibile.
+Gravità: media. Da fixare entro settembre 2026.
+2. co2_hp calcolato due volte in scenarios.py:692-697
+La prima riga viene immediatamente sovrascritta. Significa che il codice gira ma c'è dead code che indica un refactor incompleto. Probabilmente non hai bug funzionali, ma è un campanello che dice "questo modulo è stato modificato senza pulizia".
+Gravità: bassa per ora. Da pulire prossimo refactor scenari.
+3. Massa termica ground floor hardcoded a 200 kg/m² (envelope.py:588)
+Questo è più serio. Hai un campo surface_mass_kg_m2 nel dataclass BuildingFootprint, ma per il ground floor il codice ignora il valore configurato e usa 200 hardcoded. Significa che chiunque imposti un valore diverso per la massa termica del pavimento, il modello lo ignora silenziosamente.
+Gravità: alta. Da fixare.
+4. Incoerenza _JAN1_DOW tra loads.py e school/calendar_it.py (loads.py:49 + calendar_it.py:26)
+Uno usa reference year 2023 (DOW=6), l'altro 2025 (DOW=2). Se chi calcola una scuola usa un giorno della settimana riferito a 2023 e poi il calendario regionale a 2025, ottieni date sfalsate di qualche giorno. Su un anno intero la differenza è piccola, ma c'è.
+Gravità: media. Da allineare.
+5. Bolzano mancante nei REGION_ALIASES (calendar_it.py:147)
+trentino_alto_adige → trento ignora Bolzano. Le scuole altoatesine usano il calendario di Trento perdendo la pausa autunnale lunga (30/10–08/11). Per Albinea (Reggio Emilia) non è un problema, ma se mai estendi a Bolzano è da fixare.
+Gravità: bassa (per ora), media (in futuro).
+Hack fragili (da pulire ma non urgente)
+6. Riuso inv.grid_connection_eur per costo HP (scenarios.py: 6 occorrenze)
+Questo è un hack semantico pericoloso. Stai usando un campo che si chiama "costo allacciamento rete" per memorizzare il costo della pompa di calore. Funziona finché nessuno usa quel campo per il suo scopo originario contemporaneamente all'HP. Se domani aggiungi un caso "FV + HP + allacciamento rete nuovo", hai double counting.
+Gravità: media. Da rifattorare con un campo dedicato heat_pump_cost_eur.
+7. Floor magico max(..., -99999) (scenarios.py:666)
+Sta nascondendo un edge case invece di gestirlo. È un anti-pattern.
+Gravità: bassa.
+Sovrastime/sottostime nelle stime
+8. AC kWh = area × W/m² × 60 h/anno (loads_school.py:644)
+60 ore/anno di aria condizionata è davvero poco per scuole in zona D-E (Reggio, Bologna, Firenze). Probabile sottostima del consumo estivo.
+Gravità: media per le scuole nelle zone climatiche più calde.
+9. Riduzione apporti metabolici solo per HP, non per gas (loads_school.py:697-701)
+Questa è un'incoerenza che gonfia il vantaggio HP vs gas. Non di tanto, ma è asimmetria.
+Gravità: media. Importante da fixare se vuoi che il confronto HP vs gas sia onesto e difendibile.
+10. Asimmetria baseline/actual su TOU (energy_balance.py:695-712)
+Stessa logica: il calcolo del risparmio non confronta scenari simmetrici. Sovrastima leggermente il risparmio nei casi con tariffa peak-pricing.
+Gravità: media.
+Approssimazioni dichiarate ma da migliorare
+11. Formula cos_theta con hour angle fisso a 15° (envelope.py:444-450)
+Sta calcolando la radiazione solare media usando un'approssimazione "media a noon ± 1 ora" invece dell'integrale corretto. Inoltre stima frazione diffusa come G_h × 0.55 rozzamente. Funziona ma è grezza.
+Gravità: bassa (è già dichiarata come approssimazione nel codice).
+12. Bounding box rettangolari sovrapposti per regioni italiane (calendar_it.py:155-240)
+Misclassifica città di confine. È un'approssimazione dichiarata, ma comunque debolezza.
+Gravità: bassa.
+Magic numbers senza commento
+13. 0.00116 kWh/(L·K), cycles_per_year = 250, fattore 0.03 design&permits
+Sono valori corretti ma senza spiegazione. Refactoring di qualità.
+Gravità: bassissima.
+
+
 ## Convenzioni codice
 
 - Codice in **inglese** (variabili, funzioni, commenti, docstring); comunicazione utente in **italiano**.

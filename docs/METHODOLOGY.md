@@ -16,6 +16,10 @@ Il documento è scritto per essere letto sequenzialmente — dai dati climatici 
 
 ## 1. Dati climatici di input
 
+Per dire se il fotovoltaico ha senso su un edificio bisogna prima sapere quanto sole riceve quell'edificio in un anno tipico — non un anno particolarmente fortunato, non un anno particolarmente nuvoloso, ma una sintesi statistica robusta della radiazione solare in quel punto preciso della mappa. Per ricostruire l'andamento orario dell'irraggiamento, della temperatura e del vento abbiamo bisogno di dati climatici di qualità, possibilmente certificati e pubblici. Meridiana parte da qui — dai dati grezzi del Joint Research Centre della Commissione Europea — e li elabora con un percorso completamente tracciabile.
+
+Le ore di un anno sono 8 760. Ogni ora vuole un set di variabili: irraggiamento globale, diretto, diffuso, temperatura ambiente, vento. Senza questi dati nessun modello fisico di pannello fotovoltaico può funzionare. La scelta dei dati di partenza è la prima decisione critica del modello: tutto quello che segue è una conseguenza.
+
 **Fonte primaria.** Tutti i calcoli partono dai dati del [PVGIS](https://re.jrc.ec.europa.eu/pvg_tools/en/) (Photovoltaic Geographical Information System) sviluppato dal Joint Research Centre della Commissione Europea. Endpoint usato: `https://re.jrc.ec.europa.eu/api/v5_2/tmy` (`engine/pvgis_client.py:47`). PVGIS aggrega dati satellitari SARAH-3 ed ERA5 e produce un **Typical Meteorological Year (TMY)**: un anno orario sintetico costruito scegliendo, per ciascun mese, l'anno più rappresentativo della serie storica 2005–2020.
 
 **Cosa scarichiamo.** Per ogni coppia (latitudine, longitudine) PVGIS restituisce 8 760 record orari con i seguenti campi (`engine/pvgis_client.py:62-77`):
@@ -48,6 +52,8 @@ PVGIS restituisce inoltre l'**orizzonte locale**: 36 valori di altezza apparente
 ---
 
 ## 2. Modello solare
+
+Un pannello fotovoltaico inclinato sul tetto non vede l'irraggiamento orizzontale che il satellite misura: vede una composizione di radiazione diretta, diffusa e riflessa che colpisce la sua superficie con un angolo che cambia ora per ora. Tra la luce in arrivo e l'energia che esce dal contatore si interpone una catena fisica precisa — geometria solare, riflessione del vetro, temperatura della cella, efficienza dell'inverter, perdite di cablaggio — e ogni anello di questa catena ha un suo costo in kilowattora persi. Meridiana ricostruisce esplicitamente ciascun passaggio, ora per ora, scomponendo la produzione in una "cascata di perdite" che si può leggere voce per voce.
 
 Il modulo `engine/solar.py` (1 416 righe) trasforma le 8 760 ore TMY in 8 760 valori orari di potenza AC al contatore. Esistono **due percorsi di simulazione** intercambiabili:
 
@@ -173,6 +179,8 @@ con `r_deg = degradation_rate_pct_per_yr / 100` (default 0.50 %/anno, `engine/so
 
 ## 3. Multi-edificio
 
+Quasi nessun edificio reale ha un solo tetto. Una scuola tipica italiana è un complesso di corpi separati con orientamenti diversi: aule a sud, palestra a est, mensa a tetto piano. Trattare il complesso come un unico tetto medio — un'inclinazione media, un azimuth medio — produce stime che convergono al risultato giusto solo per coincidenza statistica. Meridiana permette di descrivere la geometria reale come una lista di footprint indipendenti, ciascuno con la sua area, inclinazione e orientamento, e somma le produzioni dopo aver calcolato ognuna con la fisica completa della sezione 2. La somma è precisa; la media sarebbe stata sbagliata.
+
 Un caso reale (es. complesso scolastico con palestra separata) ha più tetti con orientamento e inclinazione diversi. `simulate_pv_multi` (`engine/solar.py:1142-1342`) lo gestisce nativamente.
 
 **Input:** una lista di `BuildingFootprint` (`engine/solar.py:51-92`), ognuno con `area_m2`, `azimuth_deg`, `tilt_deg`, `usable_fraction` (default 0.70 — esclude camini, accessi, setback perimetrali). La potenza di picco è derivata come `area · usable · 0.20 kWp/m²` (densità tipica di 200 W/m², modulo da 400 Wp ≈ 2 m²). Il campo `polygon_coords` è opzionale per uso futuro (visualizzazione frontend, shading 3D) — il motore non lo usa.
@@ -194,6 +202,8 @@ Un caso reale (es. complesso scolastico con palestra separata) ha più tetti con
 ---
 
 ## 4. Modello termico (pompa di calore)
+
+Una volta che sappiamo quanta elettricità il fotovoltaico produrrà, si apre la domanda complementare: questa elettricità a chi va data? Per gli edifici italiani il maggior consumatore di energia primaria non è il consumo elettrico, è il riscaldamento — quasi sempre a gas. Sostituire la caldaia con una pompa di calore elettrica significa spostare il fabbisogno termico sul vettore elettrico, e quindi sull'autoconsumo PV. Per dire se la sostituzione conviene serve un modello orario della pompa: quanta energia elettrica chiede per produrre un kilowattora termico alle condizioni reali di quella ora — temperatura esterna, temperatura di mandata, presenza di occupanti. Il modello che usiamo è il Carnot ridotto, calibrato sui dati EN 14825.
 
 `engine/heat_pump.py` (596 righe) simula la pompa di calore in modalità riscaldamento. Il modulo è il cuore del confronto economico **gas vs. PV+HP**.
 
@@ -261,6 +271,8 @@ Quando la pompa non può coprire da sola tutto l'inverno (Italia centro-nord), s
 ---
 
 ## 5. Bilanci energetici combinati
+
+Avere il profilo orario di produzione PV e quello dei carichi non basta ancora a stimare un risparmio. Mancano le regole di dispatch: ora per ora, ogni kilowattora prodotto può andare nei consumi immediati, in una batteria locale, in rete tramite export, o sostituire una caldaia attraverso la pompa di calore. L'ordine di priorità di questi flussi determina il valore economico finale — un kilowattora autoconsumato vale tre volte un kilowattora esportato in rete, ai prezzi italiani attuali. Il bilancio orario è dove la fisica del fotovoltaico incontra la realtà della tariffazione elettrica: sotto la stessa produzione annuale possono nascondersi guadagni economici molto diversi a seconda dei profili di domanda.
 
 `engine/energy_vectors.py` (482 righe) definisce i **vettori energetici** e i prezzi; `engine/energy_balance.py` (1 213 righe) li combina ora per ora con la produzione PV.
 
@@ -335,6 +347,8 @@ Riferimenti normativi nei docstring: IEC 62619:2022 (sicurezza batterie), IEC 61
 ---
 
 ## 6. Modello economico
+
+Tradotti in kilowattora autoconsumati, esportati e risparmiati sul gas, i numeri fisici diventano cash flow. Per un investimento da decine di migliaia di euro su un orizzonte di 25 anni la domanda decisionale non è "quanti kWh produrrò", è "quanto vale oggi un euro che incasserò nel 2042". Il modello attualizza tutti i flussi a un tasso di sconto esplicito, calcola gli indicatori finanziari standard (NPV, IRR, LCOE, payback semplice e attualizzato) e applica gli incentivi italiani in vigore: detrazione fiscale per il residenziale, ammortamento accelerato per le imprese, IVA agevolata e PNRR Scuola 4.0 per gli enti pubblici, CER per le comunità energetiche, Transizione 5.0 per investimenti ESG. Ogni ipotesi è dichiarata ed editabile.
 
 `engine/economics.py` (1 156 righe) consuma i 25 anni di bilancio e produce un'**analisi tecno-economica completa**: cash flow, NPV, IRR, payback, LCOE, sensitivity, score.
 
@@ -444,6 +458,8 @@ Il break-even del gas è calcolato esplicitamente in `BuildingEnergyProfile.gas_
 
 ## 7. Modulazione scolastica (segmento scuole)
 
+Una scuola non consuma come una casa né come un'azienda. Il riscaldamento si accende il lunedì mattina su un edificio che si è raffreddato per due giorni, le luci seguono o no l'orario solare a seconda dell'aula, la mensa scarica un picco di acqua calda concentrato a mezzogiorno per duecento pasti, d'estate il consumo crolla quasi a zero. Aggiungiamo che il calendario scolastico cambia di regione in regione — in Valle d'Aosta il Carnevale dura quattro giorni, a Bolzano c'è una pausa autunnale di dieci giorni in più — e che le zone climatiche italiane definiscono per legge quanti mesi e quante ore al giorno si può scaldare. Per stimare il fotovoltaico su una scuola servono modelli pensati per la scuola.
+
 Le scuole hanno profili di consumo non residenziali: aule vuote ad agosto, weekend chiusi, ore di luce coincidenti con presenza degli studenti. Il pacchetto `school/` modellizza queste specificità su quattro file (in totale ~1 800 righe).
 
 ### 7.1 Calendario scolastico italiano
@@ -529,6 +545,8 @@ L'output (`school/incentives_school.py:113-116`): CAPEX netta dopo IVA e contrib
 
 ## 8. Validazione e calibrazione
 
+Un modello fisico-economico vale quanto i casi reali su cui è stato verificato. Senza un riferimento di taratura, qualunque cambiamento al codice rischia di degradare silenziosamente la qualità delle stime — un coefficiente alterato di un per mille può non far cadere nessun test sintattico ma spostare l'esito di un payback di mesi. Meridiana usa come banco di prova un impianto reale e ben documentato — l'installazione da 100 kWp di Borzano di Albinea, in provincia di Reggio Emilia — e impone che ogni refactor del motore produca per quel caso un risultato identico al millesimo. È una disciplina semplice ma esigente: nessuna modifica viene fusa nel branch principale senza che il valore di riferimento sia confermato dai test automatici.
+
 **Caso di riferimento.** Tutti i refactor del motore vanno validati su:
 
 - **Borzano di Albinea (RE)**, 44.601° N, 10.636° E, elevazione 173 m
@@ -555,6 +573,8 @@ Lanciabili con `pytest tests/`.
 ---
 
 ## 9. Limitazioni e zone di incertezza
+
+Ogni modello è un'approssimazione consapevole della realtà, e l'utilità di un modello dipende quanto dalle cose che cattura, altrettanto dalle cose che dichiara di non catturare. Un calcolo presentato come una stima precisa ma che nasconde i suoi compromessi è meno affidabile, non più. Nelle pagine che seguono sono elencate esplicitamente le assunzioni, i parametri hardcoded, le semplificazioni fisiche e gli incentivi non modellati — raggruppate per area (climatica, solare, termica, economica, architetturale) perché chi vuole contestare il risultato sappia subito dove guardare. Una stima Meridiana è un punto di partenza onesto per una conversazione tecnica, non una sentenza.
 
 Pubblicate **integralmente** perché siano l'argomento di chi vuole contestare il modello.
 

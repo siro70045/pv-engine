@@ -37,6 +37,7 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2. Streamlit (`app.py` + `app_school.p
 - Discrepanza ~10% tra produzione Borzano 100 kWp simulata (131.763 kWh/anno motore standalone, no pvlib) vs valore dichiarato nei banner sito/PDF (~120.000 kWh/anno). Da risolvere prima del lancio settembre 2026 con pvlib in produzione Railway.
 - Variabile Railway `ENVIRONMENT=production` non ancora impostata (cosmetico).
 - ⚠ Zero test coprono `engine/envelope.py` (`_thermal_mass_parameter`, `calc_thermal_demand`, `calc_ground_heat_loss`, `calc_solar_gains` e funzioni correlate). Ogni modifica a envelope.py è formalmente cieca rispetto alla regressione numerica. Da risolvere prima di esercitare envelope.py su casi reali (preventivo per quando Meridiana inizierà a usare envelope per le scuole reali di Albinea).
+- ⚠ Verifica esposizione del bug metabolico (commit `1f6854b`): il fix dimensionale ha cambiato la stima del consumo elettrico HP delle scuole nel flusso `/simulate/school` (+14 % sul totale annuo, +44 % sulla voce `heating_hp`). I materiali pubblici Meridiana (sito, presentazioni, PDF, magazine) NON dovrebbero citare numeri di consumo HP o payback HP derivati dall'API `/simulate/school` sulla versione pre-fix. Da verificare in revisione dei materiali pubblici prima del lancio Albinea (settembre 2026). NPV PV-scenario pressoché invariato (+0.3 %), payback invariato — quindi le raccomandazioni di investimento ("Excellent") non cambiano, solo le stime energetiche assolute.
 
 - Critiche per la correttezza del motore
 1. ✅ RISOLTA (commit `fee96c2`, 2026-05-14) — _REF_EFFICIENCY annotato come `ClassVar[float]` in `engine/energy_vectors.py:206`. Baseline Borzano identico.
@@ -57,9 +58,7 @@ Sovrastime/sottostime nelle stime
 8. AC kWh = area × W/m² × 60 h/anno (loads_school.py:644)
 60 ore/anno di aria condizionata è davvero poco per scuole in zona D-E (Reggio, Bologna, Firenze). Probabile sottostima del consumo estivo.
 Gravità: media per le scuole nelle zone climatiche più calde.
-9. Riduzione apporti metabolici solo per HP, non per gas (loads_school.py:697-701)
-Questa è un'incoerenza che gonfia il vantaggio HP vs gas. Non di tanto, ma è asimmetria.
-Gravità: media. Importante da fixare se vuoi che il confronto HP vs gas sia onesto e difendibile.
+9. ✅ RISOLTA (commit `1f6854b`, 2026-05-15) — Apporti metabolici, errore dimensionale. Caratterizzazione originale (dossier): "asimmetria HP vs gas, gonfia il vantaggio HP". Caratterizzazione corretta (post-analisi): errore di unità dimensionale dentro `school/loads_school.py:calc_school_loads`. La riduzione veniva sottratta in kWh termici da un consumo in kWh elettrici, sovrastimando ~3× (fattore SCOP). Flussi affetti: solo `/simulate/school` API REST. Il flusso `compare_scenarios` (numeri pubblici sito Meridiana) non era affetto, baseline Borzano canonical invariato (PV 131 762.9, NPV solo_pv 86 763.56, NPV solo_hp 27 286.56, SCOP 3.52). Fix: SCOP estratto come variabile riusabile + conversione termico→elettrico via `/scop` prima della sottrazione. Per scuola Borzano-like: `heating_hp` 51 424→74 078 kWh (+44 %), `reduction_pct` 39.1 %→12.2 %, NPV PV scenario praticamente invariato (+0.3 %, anche se la stima del consumo elettrico totale +14 %). Nuovi test: `test_metabolic_reduction_dimensional_consistency_split` e `_central` in `tests/test_loads_school_dow.py`.
 10. Asimmetria baseline/actual su TOU (energy_balance.py:695-712)
 Stessa logica: il calcolo del risparmio non confronta scenari simmetrici. Sovrastima leggermente il risparmio nei casi con tariffa peak-pricing.
 Gravità: media.

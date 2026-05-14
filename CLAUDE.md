@@ -38,12 +38,8 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2. Streamlit (`app.py` + `app_school.p
 - Variabile Railway `ENVIRONMENT=production` non ancora impostata (cosmetico).
 
 - Critiche per la correttezza del motore
-1. _REF_EFFICIENCY: float = 0.90 come campo dataclass invece di ClassVar (energy_vectors.py:206)
-Questo è un bug Python sottile ma reale: in una @dataclass, una variabile dichiarata senza ClassVar viene inclusa nel costruttore e nei comparison. Significa che ogni istanza ha la sua copia di _REF_EFFICIENCY e che __eq__ controlla anche quel campo. Probabilmente per ora non causa errori visibili perché il default è uguale ovunque, ma se un giorno qualcuno passasse un valore custom, il comportamento sarebbe imprevedibile.
-Gravità: media. Da fixare entro settembre 2026.
-2. co2_hp calcolato due volte in scenarios.py:692-697
-La prima riga viene immediatamente sovrascritta. Significa che il codice gira ma c'è dead code che indica un refactor incompleto. Probabilmente non hai bug funzionali, ma è un campanello che dice "questo modulo è stato modificato senza pulizia".
-Gravità: bassa per ora. Da pulire prossimo refactor scenari.
+1. ✅ RISOLTA (commit `fee96c2`, 2026-05-14) — _REF_EFFICIENCY annotato come `ClassVar[float]` in `engine/energy_vectors.py:206`. Baseline Borzano identico.
+2. ✅ RISOLTA (commit `f8d6799`, 2026-05-14) — rimossa la prima assegnazione duplicata di `co2_hp` in `engine/scenarios.py:689-691` (era sovrascritta dalla successiva). Baseline Borzano identico.
 3. Massa termica ground floor hardcoded a 200 kg/m² (envelope.py:588)
 Questo è più serio. Hai un campo surface_mass_kg_m2 nel dataclass BuildingFootprint, ma per il ground floor il codice ignora il valore configurato e usa 200 hardcoded. Significa che chiunque imposti un valore diverso per la massa termica del pavimento, il modello lo ignora silenziosamente.
 Gravità: alta. Da fixare.
@@ -54,9 +50,7 @@ Gravità: media. Da allineare.
 trentino_alto_adige → trento ignora Bolzano. Le scuole altoatesine usano il calendario di Trento perdendo la pausa autunnale lunga (30/10–08/11). Per Albinea (Reggio Emilia) non è un problema, ma se mai estendi a Bolzano è da fixare.
 Gravità: bassa (per ora), media (in futuro).
 Hack fragili (da pulire ma non urgente)
-6. Riuso inv.grid_connection_eur per costo HP (scenarios.py: 6 occorrenze)
-Questo è un hack semantico pericoloso. Stai usando un campo che si chiama "costo allacciamento rete" per memorizzare il costo della pompa di calore. Funziona finché nessuno usa quel campo per il suo scopo originario contemporaneamente all'HP. Se domani aggiungi un caso "FV + HP + allacciamento rete nuovo", hai double counting.
-Gravità: media. Da rifattorare con un campo dedicato heat_pump_cost_eur.
+6. ✅ RISOLTA (commit `ac9ca49`, 2026-05-14) — aggiunto campo dedicato `InvestmentCost.heat_pump_cost_eur` (default 0.0) in `engine/economics.py`; tutte le 5 occorrenze di hack in `engine/scenarios.py` migrate al nuovo campo. `grid_connection_eur` torna al suo scopo originario. Baseline Borzano identico (PV-only e PV+HP).
 7. Floor magico max(..., -99999) (scenarios.py:666)
 Sta nascondendo un edge case invece di gestirlo. È un anti-pattern.
 Gravità: bassa.

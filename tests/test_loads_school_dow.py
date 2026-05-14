@@ -234,3 +234,75 @@ def test_non_thermal_loads_not_modulated():
         f"Lighting Mon ({mon:.1f}) and Fri ({fri:.1f}) differ by "
         f"{abs(mon - fri) / fri:.4%}, must be within 1%"
     )
+
+
+def test_metabolic_reduction_dimensional_consistency_split():
+    """
+    Metabolic gains are produced in kWh thermal; HP electrical consumption
+    is in kWh electrical. Subtracting them directly (pre-fix bug) overstates
+    the reduction by a SCOP factor. Verify the post-fix formula:
+
+        reduction_electrical = gains_thermal / SCOP
+        heating_post         = heating_pre - reduction_electrical
+
+    For ac_type in {split, none} the SCOP defaults to 3.2.
+    Plausible reduction for a typical school: 5–20% on HP electrical
+    consumption. The pre-fix bug produced 30–60% routinely.
+    """
+    inp = _make_typical_school()
+    # ac_type defaults to "split" in the fixture → SCOP 3.2
+    res = calc_school_loads(inp)
+
+    info = res["internal_gains"]
+    reduction_pct = info["reduction_pct"]
+    gains_thermal = info["annual_kWh"]
+    heating_post = res["breakdown"]["heating_hp"]
+
+    SCOP = 3.2
+    gains_electrical = gains_thermal / SCOP
+    heating_pre = heating_post + gains_electrical
+    expected_reduction_pct = (gains_electrical / heating_pre) * 100
+
+    # Must match the dimensional formula (within rounding tolerance)
+    assert abs(reduction_pct - expected_reduction_pct) < 0.5, (
+        f"reduction_pct {reduction_pct:.2f}% != dimensional "
+        f"{expected_reduction_pct:.2f}%. The pre-fix buggy formula "
+        f"would produce ~{(gains_thermal / heating_pre) * 100:.2f}%."
+    )
+
+    # Plausibility range: a typical Italian school has metabolic gains
+    # offsetting 5–20% of HP electrical demand. Anything above 25% is
+    # symptomatic of a unit error.
+    assert 5.0 <= reduction_pct <= 20.0, (
+        f"reduction_pct {reduction_pct:.2f}% out of plausible range "
+        f"[5%, 20%]. Pre-fix bug typically gave 30–40%."
+    )
+
+
+def test_metabolic_reduction_dimensional_consistency_central():
+    """
+    Same as the split variant, but with ac_type='central' → SCOP 2.8.
+    Confirms the scop variable is used (not a hardcoded 3.2) in the
+    metabolic conversion as well.
+    """
+    inp = _make_typical_school()
+    inp.ac_type = "central"  # forces SCOP = 2.8 in calc_school_loads
+    res = calc_school_loads(inp)
+
+    info = res["internal_gains"]
+    reduction_pct = info["reduction_pct"]
+    gains_thermal = info["annual_kWh"]
+    heating_post = res["breakdown"]["heating_hp"]
+
+    SCOP = 2.8
+    gains_electrical = gains_thermal / SCOP
+    heating_pre = heating_post + gains_electrical
+    expected_reduction_pct = (gains_electrical / heating_pre) * 100
+
+    assert abs(reduction_pct - expected_reduction_pct) < 0.5, (
+        f"reduction_pct {reduction_pct:.2f}% != dimensional "
+        f"{expected_reduction_pct:.2f}% for ac_type='central' (SCOP=2.8). "
+        f"If the test fails with a value matching SCOP=3.2 instead, the "
+        f"scop variable is not being threaded through to the metabolic "
+        f"conversion."
+    )

@@ -595,6 +595,13 @@ def calc_school_loads(
     heat_need_kwh_m2 = thermal_benchmark_kwh / inp.floor_area_m2
     electric_benchmark_kwh = get_electric_benchmark(zone, inp.school_type, inp.floor_area_m2)
 
+    # SCOP medio annuo della pompa di calore, dipendente dalla presenza di
+    # climatizzazione estiva (sistemi reversibili split tendono a SCOP più
+    # alto grazie alla logica unificata). Estratto come variabile per essere
+    # riutilizzato sia nel calcolo del consumo elettrico HP sia nella
+    # conversione degli apporti metabolici (termici → elettrici).
+    scop = 3.2 if inp.ac_type in ("split", "none") else 2.8
+
     # ── School day length (hours of active use) ────────────────────────────────
     if inp.school_type == "university_dept":
         day_hours = 11    # 08:00-19:00
@@ -648,7 +655,6 @@ def calc_school_loads(
     # ── 9. Heat pump (only if heating_system == "heat_pump") ─────────────────
     heating_kwh = 0.0
     if inp.heating_system == "heat_pump":
-        scop = 3.2 if inp.ac_type in ("split", "none") else 2.8
         heating_kwh = inp.floor_area_m2 * heat_need_kwh_m2 / scop
 
     # ── 10. Miscellaneous (servers, copiers, AV equipment, etc.) ─────────────
@@ -692,11 +698,19 @@ def calc_school_loads(
                     else 1.0)
 
     # ── Internal heat gains from occupants ────────────────────────────────────
+    # Gli apporti metabolici (calore corporeo) riducono il fabbisogno termico
+    # dell'edificio. Per scenari HP devono essere convertiti da kWh termici
+    # a kWh elettrici equivalenti dividendo per il SCOP, prima di essere
+    # sottratti al consumo elettrico HP.
+    # Fix unità: prima del 2026-05-15, gli apporti termici venivano sottratti
+    # direttamente dal consumo elettrico, sovrastimando la riduzione di un
+    # fattore SCOP (~3×).
     gains = _calc_internal_gains(inp)
     reduction_pct = 0.0
     if inp.heating_system == "heat_pump" and breakdown["heating_hp"] > 0:
         heating_original = breakdown["heating_hp"]
-        heating_reduced  = max(0.0, heating_original - gains["annual_gains_kWh"])
+        gains_electrical = gains["annual_gains_kWh"] / scop
+        heating_reduced  = max(0.0, heating_original - gains_electrical)
         reduction_pct    = (1 - heating_reduced / heating_original) * 100
         breakdown["heating_hp"] = round(heating_reduced, 1)
         total_estimated  = sum(breakdown.values())

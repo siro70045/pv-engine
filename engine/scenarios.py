@@ -686,12 +686,7 @@ def compare_scenarios(
         eco_hp = calc_economics(fake_yearly_hp, inv_hp_only, opex_hp, cfg.financial,
                                 cfg.incentives_hp)
 
-        co2_hp = (bp.electricity_kwh_annual * bp.co2_electricity_kg_per_kwh
-                  + hp_result_year1.hp_electricity_co2_kg
-                  + hp_result_year1.backup_fuel_co2_kg)
-        # Subtract HP el CO₂ from electricity (it's included in hp_electricity_co2_kg)
-        # and add back via grid import (only non-HP grid import)
-        # Simpler: total = (all_el_from_grid × co2_factor) + backup_gas_co2
+        # total = (all_el_from_grid × co2_factor) + backup_gas_co2
         total_grid_import = bp.electricity_kwh_annual + hp_result_year1.hp_electricity_kWh
         co2_hp = (total_grid_import * bp.co2_electricity_kg_per_kwh
                   + hp_result_year1.backup_fuel_units * bp.gas_price.co2_factor_kg_per_unit)

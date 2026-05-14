@@ -25,7 +25,7 @@ CO₂ emission factors
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import ClassVar, Optional
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -203,7 +203,7 @@ class GasBoilerSystem:
 
     # Reference efficiency embedded in DEFAULT_PRICES.unit_kwh_conversion
     # (natural gas: 0.90 assumed).  We correct for the actual boiler efficiency.
-    _REF_EFFICIENCY: float = 0.90
+    _REF_EFFICIENCY: ClassVar[float] = 0.90
 
     @property
     def annual_thermal_output_kWh(self) -> float:

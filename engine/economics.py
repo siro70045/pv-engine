@@ -70,6 +70,10 @@ class InvestmentCost:
     grid_connection_eur : float
         Grid connection upgrade cost [€].
         0 for small systems already connected.
+    heat_pump_cost_eur : float
+        Heat pump system installed cost [€] (unit + installation).
+        0 if no HP in this scenario. Used by `engine/scenarios.py`
+        for HP-bearing scenarios (solo_hp, pv_hp, pv_hp_biv).
     other_capex_eur : float
         Miscellaneous: EV charger, monitoring system, structural works, etc.
     """
@@ -79,6 +83,7 @@ class InvestmentCost:
     battery_capacity_kWh: float = 0.0
     design_and_permits_eur: float = 0.0
     grid_connection_eur: float = 0.0
+    heat_pump_cost_eur: float = 0.0
     other_capex_eur: float = 0.0
 
     @property
@@ -95,6 +100,7 @@ class InvestmentCost:
                 + self.battery_capex_eur
                 + self.design_and_permits_eur
                 + self.grid_connection_eur
+                + self.heat_pump_cost_eur
                 + self.other_capex_eur)
 
 

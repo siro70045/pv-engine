@@ -343,8 +343,7 @@ def _build_investment_hp(
         design_and_permits_eur= total_cost * 0.03,
         other_capex_eur       = hp.terminal_replacement_cost_eur,
     )
-    # Store HP cost in grid_connection_eur (no semantic overlap in HP-only scenario)
-    inv.grid_connection_eur = rated_kW * hp.installed_cost_eur_kW
+    inv.heat_pump_cost_eur = rated_kW * hp.installed_cost_eur_kW
     opex = OperatingCost(
         om_pct_of_capex_per_yr = 1.5,  # HP maintenance: ~1.5%/yr
         om_escalation_rate     = 0.02,
@@ -577,7 +576,7 @@ def compare_scenarios(
             annual_heating_covered_by_hp_pct = (hp_r.hp_coverage_fraction * 100 if hp_r else 0.0),
             capex_eur                     = inv.total_capex_eur,
             pv_capex_eur                  = inv.pv_capex_eur,
-            hp_capex_eur                  = inv.grid_connection_eur,
+            hp_capex_eur                  = inv.heat_pump_cost_eur,
             annual_electricity_cost_eur   = el_grid_cost,
             annual_gas_cost_eur           = gas_remaining_cost,
             annual_om_cost_eur            = opex.om_year1(inv.total_capex_eur),
@@ -623,7 +622,7 @@ def compare_scenarios(
         # Use a dummy PV investment with 0 kWp — economics from HP investment only
         inv_hp_only = InvestmentCost(
             pv_cost_eur_kWp=0, peak_power_kWp=0,
-            grid_connection_eur=hp_capex,
+            heat_pump_cost_eur=hp_capex,
             design_and_permits_eur=hp_capex * 0.03,
             other_capex_eur=cfg.heat_pump.terminal_replacement_cost_eur,
         )
@@ -744,7 +743,7 @@ def compare_scenarios(
             battery_cost_eur_kWh  = cfg.investment_pv.battery_cost_eur_kWh,
             battery_capacity_kWh  = cfg.battery.capacity_kWh,
             design_and_permits_eur= cfg.investment_pv.design_and_permits_eur + hp_capex * 0.03,
-            grid_connection_eur   = hp_capex,
+            heat_pump_cost_eur    = hp_capex,
             other_capex_eur       = (cfg.investment_pv.other_capex_eur
                                      + cfg.heat_pump.terminal_replacement_cost_eur),
         )
@@ -787,7 +786,7 @@ def compare_scenarios(
             battery_cost_eur_kWh  = cfg.investment_pv.battery_cost_eur_kWh,
             battery_capacity_kWh  = cfg.battery.capacity_kWh,
             design_and_permits_eur= cfg.investment_pv.design_and_permits_eur + hp_capex_biv * 0.03,
-            grid_connection_eur   = hp_capex_biv,
+            heat_pump_cost_eur    = hp_capex_biv,
             other_capex_eur       = (cfg.investment_pv.other_capex_eur
                                      + cfg.heat_pump.terminal_replacement_cost_eur),
         )

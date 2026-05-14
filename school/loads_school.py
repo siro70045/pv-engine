@@ -51,6 +51,30 @@ _DOW_FACTORS_THERMAL = {
 }
 
 
+# Ore equivalenti annue di funzionamento AC a pieno carico, calibrate per
+# zona climatica DPR 412/93. Letteratura ENEA + osservazione diretta su
+# scuole italiane: zone calde (A) hanno fabbisogno di raffrescamento
+# significativo, zone fredde (F) virtualmente nullo.
+ORE_AC_BASE_PER_ZONE = {
+    "A": 600, "B": 450, "C": 320,
+    "D": 220, "E": 150, "F": 20,
+}
+
+# Frazione dell'area edificio effettivamente climatizzata. Le scuole
+# italiane medie hanno AC solo in poche zone (segreteria, dirigenza),
+# poche scuole moderne hanno AC esteso a quasi tutte le aule.
+AC_COVERAGE_FRACTION = {
+    "none": 0.0, "few_zones": 0.15,
+    "some_classrooms": 0.50, "almost_all": 0.90,
+}
+
+# Moltiplicatore sulle ore base che riflette quanto intensamente
+# l'AC viene effettivamente usato durante la stagione calda.
+AC_INTENSITY_MULTIPLIER = {
+    "rare": 0.25, "moderate": 0.55, "intensive": 0.90,
+}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # INPUT DATACLASS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -89,6 +113,10 @@ class SchoolLoadsInput:
     heating_system: str = "gas_boiler"
     has_ac: bool = False
     ac_type: str = "none"
+    # Modello AC parametrico — vedi ORE_AC_BASE_PER_ZONE,
+    # AC_COVERAGE_FRACTION, AC_INTENSITY_MULTIPLIER.
+    ac_coverage: str = "few_zones"   # "none" | "few_zones" | "some_classrooms" | "almost_all"
+    ac_intensity: str = "rare"       # "rare" | "moderate" | "intensive"
 
     # Illuminazione
     lighting_type: str = "fluorescent"
@@ -645,12 +673,26 @@ def calc_school_loads(
     elevator_kwh = 2500.0 if inp.has_elevator else 0.0
 
     # ── 8. Summer cooling (AC) ────────────────────────────────────────────────
+    # Modello parametrico: consumo = area_AC × W/m² × ore_zona × intensity / 1000
+    # dove area_AC = floor_area × coverage_fraction. Coverage modula SOLO
+    # l'area, intensity modula SOLO le ore — entrambi linearmente, senza
+    # effetti quadratici. Sostituisce il vecchio "60 ore hardcoded
+    # indipendentemente da zona e utilizzo".
     ac_kwh = 0.0
-    if inp.has_ac or inp.ac_type not in ("none", ""):
+    if (inp.has_ac or inp.ac_type not in ("none", "")) and inp.ac_coverage != "none":
+        coverage_fraction = AC_COVERAGE_FRACTION.get(inp.ac_coverage, 0.15)
+        intensity_multiplier = AC_INTENSITY_MULTIPLIER.get(inp.ac_intensity, 0.25)
+        ore_zona = ORE_AC_BASE_PER_ZONE.get(zone, 150)
+
         if inp.ac_type == "split":
-            ac_kwh = inp.floor_area_m2 * 8.0 * 60.0 / 1000.0
+            w_per_m2 = 8.0
         elif inp.ac_type == "central":
-            ac_kwh = inp.floor_area_m2 * 12.0 * 60.0 / 1000.0
+            w_per_m2 = 12.0
+        else:
+            w_per_m2 = 0.0
+
+        area_ac = inp.floor_area_m2 * coverage_fraction
+        ac_kwh = area_ac * w_per_m2 * ore_zona * intensity_multiplier / 1000.0
 
     # ── 9. Heat pump (only if heating_system == "heat_pump") ─────────────────
     heating_kwh = 0.0

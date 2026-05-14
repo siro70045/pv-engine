@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from school.calendar_it import _dow
 from school.loads_school import (
     _DOW_FACTORS_THERMAL,
+    AC_COVERAGE_FRACTION,
+    AC_INTENSITY_MULTIPLIER,
+    ORE_AC_BASE_PER_ZONE,
     SchoolLoadsInput,
     calc_school_loads,
 )
@@ -305,4 +308,99 @@ def test_metabolic_reduction_dimensional_consistency_central():
         f"If the test fails with a value matching SCOP=3.2 instead, the "
         f"scop variable is not being threaded through to the metabolic "
         f"conversion."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AC PARAMETRIC MODEL (coverage + intensity + climate zone)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _expected_ac_kwh(area, w_per_m2, ore_zona, coverage, intensity):
+    """Reference formula — must match the implementation in calc_school_loads."""
+    cov = AC_COVERAGE_FRACTION[coverage]
+    inten = AC_INTENSITY_MULTIPLIER[intensity]
+    return area * cov * w_per_m2 * ore_zona * inten / 1000.0
+
+
+def test_ac_default_conservative():
+    """Default ac_coverage='few_zones' + ac_intensity='rare' for back-compat."""
+    inp = SchoolLoadsInput()
+    assert inp.ac_coverage == "few_zones", (
+        f"default ac_coverage should be 'few_zones', got {inp.ac_coverage!r}"
+    )
+    assert inp.ac_intensity == "rare", (
+        f"default ac_intensity should be 'rare', got {inp.ac_intensity!r}"
+    )
+
+
+def test_ac_coverage_modulates_area_linearly():
+    """AC kWh scales linearly with coverage (NOT squared)."""
+    base = _make_typical_school()
+    base.ac_coverage = "few_zones"
+    base.ac_intensity = "moderate"
+    res_few = calc_school_loads(base)
+
+    base.ac_coverage = "some_classrooms"
+    res_some = calc_school_loads(base)
+
+    ratio = res_some["breakdown"]["ac"] / res_few["breakdown"]["ac"]
+    expected = AC_COVERAGE_FRACTION["some_classrooms"] / AC_COVERAGE_FRACTION["few_zones"]
+    assert abs(ratio - expected) < 0.05, (
+        f"AC ratio {ratio:.3f} should match coverage ratio {expected:.3f} "
+        f"(linear scaling — quadratic scaling would give {expected**2:.3f})"
+    )
+
+
+def test_ac_intensity_modulates_hours_linearly():
+    """AC kWh scales linearly with intensity multiplier."""
+    base = _make_typical_school()
+    base.ac_coverage = "almost_all"
+    base.ac_intensity = "rare"
+    res_rare = calc_school_loads(base)
+
+    base.ac_intensity = "intensive"
+    res_int = calc_school_loads(base)
+
+    ratio = res_int["breakdown"]["ac"] / res_rare["breakdown"]["ac"]
+    expected = AC_INTENSITY_MULTIPLIER["intensive"] / AC_INTENSITY_MULTIPLIER["rare"]
+    assert abs(ratio - expected) < 0.05, (
+        f"AC ratio {ratio:.3f} should match intensity ratio {expected:.3f}"
+    )
+
+
+def test_ac_none_or_no_coverage_yields_zero():
+    """ac_type='none' OR ac_coverage='none' must produce ac_kwh = 0."""
+    base = _make_typical_school()
+    base.ac_type = "none"
+    base.has_ac = False
+    res = calc_school_loads(base)
+    assert res["breakdown"]["ac"] == 0.0, (
+        f"ac_type=none should give 0, got {res['breakdown']['ac']}"
+    )
+
+    base = _make_typical_school()
+    base.ac_coverage = "none"
+    res = calc_school_loads(base)
+    assert res["breakdown"]["ac"] == 0.0, (
+        f"ac_coverage=none should give 0 even with ac_type=split, "
+        f"got {res['breakdown']['ac']}"
+    )
+
+
+def test_ac_zone_climatic_sensitivity():
+    """Zone A consumes much more than zone F at identical coverage/intensity."""
+    base = _make_typical_school()
+    base.ac_coverage = "almost_all"
+    base.ac_intensity = "intensive"
+
+    base.climate_zone = "A"
+    res_a = calc_school_loads(base)
+    base.climate_zone = "F"
+    res_f = calc_school_loads(base)
+
+    ratio = res_a["breakdown"]["ac"] / max(res_f["breakdown"]["ac"], 1e-9)
+    expected = ORE_AC_BASE_PER_ZONE["A"] / ORE_AC_BASE_PER_ZONE["F"]
+    assert abs(ratio - expected) < 0.05 * expected, (
+        f"Zone A/F AC ratio {ratio:.1f}× should match zone hours ratio "
+        f"{expected:.1f}× (600/20)"
     )

@@ -162,6 +162,8 @@ def _school_inputs(req: SchoolLoadsRequest) -> SchoolLoadsInput:
         heating_system=req.heating_system,
         has_ac=req.has_ac,
         ac_type=req.ac_type,
+        ac_coverage=req.ac_coverage,
+        ac_intensity=req.ac_intensity,
         lighting_type=req.lighting_type,
         climate_zone=req.climate_zone,
         region=req.region,

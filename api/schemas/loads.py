@@ -61,6 +61,8 @@ class SchoolLoadsRequest(BaseModel):
     heating_system: Literal["gas_boiler", "heat_pump", "district", "electric"] = "gas_boiler"
     has_ac: bool = False
     ac_type: Literal["none", "split", "central"] = "none"
+    ac_coverage: Literal["none", "few_zones", "some_classrooms", "almost_all"] = "few_zones"
+    ac_intensity: Literal["rare", "moderate", "intensive"] = "rare"
 
     # Lighting
     lighting_type: Literal["led", "fluorescent", "mixed"] = "fluorescent"

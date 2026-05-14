@@ -782,6 +782,39 @@ def step_energy():
     has_ac   = ac_type != "none"
     sset(ac_type=ac_type, has_ac=has_ac)
 
+    if has_ac:
+        coverage_opts = {
+            "Poche zone (es. segreteria, dirigenza)":  "few_zones",
+            "Alcune aule (~metà degli ambienti)":      "some_classrooms",
+            "Quasi tutte le aule e gli uffici":         "almost_all",
+        }
+        prev_cov = ss("ac_coverage", "few_zones")
+        if prev_cov not in coverage_opts.values():
+            prev_cov = "few_zones"
+        cov_lbl = st.selectbox(
+            "Estensione del condizionamento",
+            list(coverage_opts.keys()),
+            index=list(coverage_opts.values()).index(prev_cov),
+            help="Quanta parte dell'edificio è effettivamente climatizzata.",
+        )
+        sset(ac_coverage=coverage_opts[cov_lbl])
+
+        intensity_opts = {
+            "Raro (solo giorni più caldi)":             "rare",
+            "Moderato (estate piena, alcune ore)":      "moderate",
+            "Intensivo (uso quotidiano per più ore)":   "intensive",
+        }
+        prev_int = ss("ac_intensity", "rare")
+        int_lbl = st.selectbox(
+            "Intensità d'uso del condizionamento",
+            list(intensity_opts.keys()),
+            index=list(intensity_opts.values()).index(prev_int),
+            help="Quanto spesso e a lungo viene effettivamente acceso.",
+        )
+        sset(ac_intensity=intensity_opts[int_lbl])
+    else:
+        sset(ac_coverage="none", ac_intensity="rare")
+
     light_opts = {
         "Full LED":            "led",
         "Mostly fluorescent":  "fluorescent",
@@ -920,6 +953,8 @@ def step_energy():
             heating_system    = heating_system,
             has_ac            = has_ac,
             ac_type           = ac_type,
+            ac_coverage       = ss("ac_coverage", "few_zones"),
+            ac_intensity      = ss("ac_intensity", "rare"),
             lighting_type     = ss("lighting_type", "fluorescent"),
             climate_zone      = ss("climate_zone", "E"),
             region            = ss("region", "emilia_romagna"),

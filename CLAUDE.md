@@ -36,13 +36,12 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2. Streamlit (`app.py` + `app_school.p
 
 - Discrepanza ~10% tra produzione Borzano 100 kWp simulata (131.763 kWh/anno motore standalone, no pvlib) vs valore dichiarato nei banner sito/PDF (~120.000 kWh/anno). Da risolvere prima del lancio settembre 2026 con pvlib in produzione Railway.
 - Variabile Railway `ENVIRONMENT=production` non ancora impostata (cosmetico).
+- ⚠ Zero test coprono `engine/envelope.py` (`_thermal_mass_parameter`, `calc_thermal_demand`, `calc_ground_heat_loss`, `calc_solar_gains` e funzioni correlate). Ogni modifica a envelope.py è formalmente cieca rispetto alla regressione numerica. Da risolvere prima di esercitare envelope.py su casi reali (preventivo per quando Meridiana inizierà a usare envelope per le scuole reali di Albinea).
 
 - Critiche per la correttezza del motore
 1. ✅ RISOLTA (commit `fee96c2`, 2026-05-14) — _REF_EFFICIENCY annotato come `ClassVar[float]` in `engine/energy_vectors.py:206`. Baseline Borzano identico.
 2. ✅ RISOLTA (commit `f8d6799`, 2026-05-14) — rimossa la prima assegnazione duplicata di `co2_hp` in `engine/scenarios.py:689-691` (era sovrascritta dalla successiva). Baseline Borzano identico.
-3. Massa termica ground floor hardcoded a 200 kg/m² (envelope.py:588)
-Questo è più serio. Hai un campo surface_mass_kg_m2 nel dataclass BuildingFootprint, ma per il ground floor il codice ignora il valore configurato e usa 200 hardcoded. Significa che chiunque imposti un valore diverso per la massa termica del pavimento, il modello lo ignora silenziosamente.
-Gravità: alta. Da fixare.
+3. ✅ RISOLTA (commit `b1c561c`, 2026-05-14) — Massa termica ground floor: aggiunto campo `GroundFloor.surface_mass_kg_m2` (default 350.0 kg/m², mediana scuole italiane pre-1980 con soletta laterocemento; range 300-500 EN ISO 13790 "heavy"). `engine/envelope.py:588` ora legge il campo invece di usare il `200` hardcoded. Caratterizzazione precedente leggermente imprecisa: il dataclass `GroundFloor` non aveva il campo (non si "ignorava un valore configurato"), il bug era un'asimmetria col trattamento di walls/roof. Baseline Borzano identico — il flusso `compare_scenarios` non esercita `envelope.py`. Impatto reale solo per chi usa `main.py` legacy con `Envelope` esplicito.
 4. Incoerenza _JAN1_DOW tra loads.py e school/calendar_it.py (loads.py:49 + calendar_it.py:26)
 Uno usa reference year 2023 (DOW=6), l'altro 2025 (DOW=2). Se chi calcola una scuola usa un giorno della settimana riferito a 2023 e poi il calendario regionale a 2025, ottieni date sfalsate di qualche giorno. Su un anno intero la differenza è piccola, ma c'è.
 Gravità: media. Da allineare.

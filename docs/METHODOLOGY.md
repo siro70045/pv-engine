@@ -530,7 +530,7 @@ Caratteristiche distintive:
 - **Lavabi**: profilo stagionale 1.5×/1.0×/0.6×/0.3× (inverno-estate); base 0.7 L/persona se edificio post-1990, 0.3 L pre-1990.
 - **Standby loss**: maggiorazione fissa del 15 % (`dhw_standby_losses_pct`, `school/loads_school.py:107`).
 
-**Apporti interni metabolici** (`school/loads_school.py:541-543`, ASHRAE Fundamentals Ch.18): 70 W/studente in aula, 75 W/docente, 85 W/ATA. Modellati anche come riduzione del fabbisogno di riscaldamento (commit `9417f1c`): il calore corporeo abbatte il delta termico richiesto al sistema.
+**Apporti interni metabolici** (`school/loads_school.py:541-543`, ASHRAE Fundamentals Ch.18): 70 W/studente in aula, 75 W/docente, 85 W/ATA. Modellati anche come riduzione del fabbisogno di riscaldamento (commit `9417f1c`): il calore corporeo abbatte il delta termico richiesto al sistema. Per scenari con pompa di calore la riduzione viene convertita da kWh termici a kWh elettrici equivalenti dividendo per il SCOP (`school/loads_school.py:701-707`) prima di sottrarla al consumo elettrico HP, così da garantire coerenza dimensionale.
 
 **Valutazione strutturale tetti** (`school/loads_school.py`, commit `cfcc013`): stima cost-of-readiness basata sull'era di costruzione, valuta se il tetto regge l'installazione PV senza opere strutturali aggiuntive.
 

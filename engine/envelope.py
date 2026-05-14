@@ -152,6 +152,14 @@ class GroundFloor:
         Thermal conductivity of ground [W/mK]. Typical: 1.5 (clay), 2.0 (rock).
     edge_insulation_R : float
         Additional edge insulation R-value [m²K/W]. 0 if none.
+    surface_mass_kg_m2 : float
+        Areal thermal mass of the ground floor [kg/m²]. Used by
+        `_thermal_mass_parameter` for the building thermal-inertia term
+        (EN ISO 13790 §12.3.1.2). Default 350.0 reflects the median for
+        Italian schools pre-1980 with a laterocement or reinforced
+        concrete slab plus screed and tile finish (typical range
+        300–500 kg/m², EN ISO 13790 "heavy" class). For post-2005 NZEB
+        buildings use 200–300 kg/m².
     """
     area_m2: float
     perimeter_m: float
@@ -159,6 +167,7 @@ class GroundFloor:
     wall_thickness_m: float
     ground_lambda: float = 1.5
     edge_insulation_R: float = 0.0
+    surface_mass_kg_m2: float = 350.0
 
 
 @dataclass
@@ -583,9 +592,13 @@ def _thermal_mass_parameter(env: Envelope, floor_area_m2: float) -> float:
         w.surface_mass_kg_m2 * w.area_m2 * C_specific_kJ_kgK
         for w in env.walls
     )
-    # Add roof and floor contributions (typically lighter effect — use 50% weight)
+    # Add roof and floor contributions, weighted at 50% to account for
+    # lower coupling with internal air vs walls (slab partially shielded
+    # by floor finishes, ground thermal coupling). Surface mass is now
+    # read from the respective components symmetrically (was hardcoded
+    # 200 kg/m² for ground floor before fix).
     C_m_kJ_K += 0.5 * env.roof.surface_mass_kg_m2 * env.roof.area_m2 * C_specific_kJ_kgK
-    C_m_kJ_K += 0.5 * env.ground_floor.area_m2 * 200 * C_specific_kJ_kgK  # approx slab
+    C_m_kJ_K += 0.5 * env.ground_floor.surface_mass_kg_m2 * env.ground_floor.area_m2 * C_specific_kJ_kgK
 
     return C_m_kJ_K  # caller computes tau using H_total
 

@@ -181,6 +181,18 @@ con `r_deg = degradation_rate_pct_per_yr / 100` (default 0.50 %/anno, `engine/so
 
 **Standard di riferimento:** IEC 61724-1:2021 (performance monitoring), IEC 61853-1:2011 (rating moduli), EN 50530:2010 (inverter).
 
+### 2.11 Modello solare per l'involucro termico
+
+`engine/envelope.py` calcola i guadagni solari attraverso le vetrate del fabbricato (EN ISO 13790 §11.3). È un percorso solare **separato** da `engine/solar.py`: lavora su scala mensile, non oraria, perché alimenta un bilancio termico quasi-stazionario mensile in cui i guadagni solari entrano già aggregati in dodici valori per facciata. Documentarlo come modulo a sé è importante perché alcune scelte modellistiche si differenziano dal motore PV.
+
+**Decomposizione GHI → beam + diffusa.** La radiazione globale orizzontale mensile in input viene decomposta in componente diretta e diffusa **ora per ora** sul giorno medio mensile. Il modello è **Erbs, Klein & Duffie (1982)** (Solar Energy 28(4), 293–302), una formula a tratti che lega la frazione diffusa `kd = G_d / G_h` all'indice di trasparenza orario `kt = G_h / G_o,h` (con `G_o,h` radiazione extra-atmosferica oraria su orizzontale, calcolata con costante solare `G_sc = 1367 W/m²` corretta per l'eccentricità orbitale annuale). La distribuzione oraria della radiazione globale sul giorno medio segue **Collares-Pereira & Rabl (1979)** (Solar Energy 22(2), 155–164), con i pesi orari rinormalizzati a 1 sulle ore di luce per garantire la conservazione dell'energia rispetto all'input mensile.
+
+**Trasposizione su superficie inclinata.** Per ogni ora di luce del giorno medio mensile il coseno dell'angolo di incidenza `cos θ` è calcolato istante per istante (Duffie & Beckman eq. 1.6.5a) con l'angolo orario `ω` corrente, integrato su tutte le ore di luce e poi scalato per il numero di giorni del mese. La componente diretta usa `Rb = max(cos θ, 0) / cos θ_z`; la diffusa usa il modello **isotropo di Liu & Jordan** (`F_sky = (1 + cos β)/2`); la riflessione del suolo usa albedo `ρ = 0.20` (stesso valore di `engine/solar.py`).
+
+**Convenzione orientamenti.** `orientation_deg`: 0 = Nord, 90 = Est, 180 = Sud, 270 = Ovest. `tilt_deg`: 0 = orizzontale, 90 = verticale. Coerente con i docstring di `engine/envelope.py:Window`.
+
+**Perché un modello separato da `engine/solar.py`.** Il motore PV in §2 lavora a risoluzione oraria sull'intero anno, con TMY 8 760 valori e trasposizione Perez 1990 anisotropica. L'involucro termico non ha bisogno di questa granularità per calcolare i guadagni solari mensili in EN ISO 13790: una catena Erbs + Liu & Jordan applicata sul giorno medio mensile è lo standard accademico per questo contesto e mantiene il modulo `envelope.py` autonomo (zero dipendenze da TMY orari, zero accoppiamento con il client PVGIS). Resta un debito tecnico esplicito (§9 Solare) — unificare in futuro i due percorsi su loop 8 760-ore e diffusa anisotropica Perez, quando sarà sensato esercitare il modulo `envelope.py` su edifici reali e non più solo come modello accademico parallelo.
+
 ---
 
 ## 3. Multi-edificio
@@ -601,6 +613,8 @@ Pubblicate **integralmente** perché siano l'argomento di chi vuole contestare i
 - **`usable_fraction = 0.70` default** generico (`engine/solar.py:83`): nessun'analisi della geometria reale del tetto.
 - **`200 W/m²` densità modulo** hardcoded (`engine/solar.py:92`) — corretto per moduli mainstream 2024, sottostima moduli alta efficienza (>23 %).
 - **Bias pvlib vs standalone.** I due percorsi divergono di 2–3 % annuali su casi estremi (alte latitudini, alti tilt). Il default è pvlib se installato.
+- **Involucro termico — diffusa isotropa Liu & Jordan.** Il modello solare di `engine/envelope.py` (§2.11) usa il modello isotropo per la frazione diffusa sulle superfici inclinate. È meno accurato di Perez 1990 anisotropico (già implementato per il motore PV) ma sufficiente per il bilancio mensile EN ISO 13790. Estendere `envelope.py` a Perez richiederebbe DNI/DHI orari sul giorno medio — debito tecnico tracciato.
+- **Involucro termico — doppio percorso solare con engine/solar.py.** Il modulo `envelope.py` mantiene un percorso solare mensile autonomo invece di riusare le funzioni orarie già presenti in `engine/solar.py` (posizione solare, decomposizione, trasposizione Perez). La "strada radicale" — refactor di `envelope.py` come loop 8 760-ore alimentato da TMY orario, con unificazione delle funzioni solari fra i due moduli — eliminerebbe questa duplicazione ma è fuori scope finché `envelope.py` resta un modello accademico parallelo non esercitato da `compare_scenarios` né da `/simulate/school`. Debito tecnico tracciato.
 
 ### Termico (pompa di calore)
 

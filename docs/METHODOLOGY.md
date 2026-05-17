@@ -330,11 +330,12 @@ Riferimenti normativi nei docstring: IEC 62619:2022 (sicurezza batterie), IEC 61
 
 `GridTariff` (`engine/energy_balance.py:130`) modella tariffa import/export con opzioni:
 
+- **Prezzo base / off-peak.** `import_price_eur_kWh` è il prezzo base. Con `time_of_use=False` è la tariffa flat applicata a ogni kWh importato. Con `time_of_use=True` è il prezzo off-peak; il prezzo peak nelle `peak_hours` è `import_price_eur_kWh × peak_price_multiplier`.
 - **TOU (Time-of-Use)** semplificato: ore peak configurabili (default 8:00–20:59) con moltiplicatore `peak_price_multiplier` (default 1.5×) sul prezzo base.
 - **Net metering** (Scambio sul Posto): credito = `min(export, cap) × import_price`; sopra il cap, eccesso pagato a `export_price` (`engine/energy_balance.py:720-725`). Lo SSP è chiuso per nuovi impianti dal 2024 ma resta nel motore per stime su impianti esistenti.
 - **Demand charge saving**: per utenze BT/MT con tariffa basata sulla potenza di picco mensile, il modello calcola il risparmio in € moltiplicando il delta-peak (con vs senza batteria) per `demand_charge_eur_kW_month` (`engine/energy_balance.py:765-770`).
 
-**Asimmetria nota.** Il "saving" verso baseline (`engine/energy_balance.py:695`) usa sempre `demand × import_price` semplice (no TOU), mentre il costo "with-PV" può usare TOU. Questo sovrastima leggermente il saving in casi TOU; per valutazioni rigorose vanno usate le stesse regole tariffarie su entrambi i lati.
+**Simmetria baseline ↔ actual.** Il calcolo del risparmio economico applica la stessa regola tariffaria (flat o TOU) sia al baseline (`grid_cost_without_pv_eur`) sia allo scenario con FV (`grid_cost_with_pv_eur`). Sotto tariffa TOU le ore peak sono valutate a `import_price × peak_multiplier` e le ore off-peak al prezzo base, e lo stesso prezzo orario è usato per i due lati. Garantire questa simmetria è necessario perché il FV tende a coprire preferenzialmente le ore peak: usare TOU solo sull'actual e flat sul baseline produrrebbe un risparmio apparente sistematicamente *sottostimato* (e, in scenari con FV concentrata su ore peak, anche negativo). Il fix è documentato come anomalia ✅ Voce #10 (Categoria 3) nel `CLAUDE.md`.
 
 ### 5.3 Lifetime e degradazioni
 
@@ -707,4 +708,4 @@ Tutti i percorsi sono relativi alla root `pv_engine/`:
 
 ---
 
-*Documento aggiornato al 13 maggio 2026. Aggiornare quando: (a) un coefficiente fisico cambia in `engine/`, (b) si aggiungono incentivi o si rimuovono quelli citati, (c) un test di retrocompatibilità (Borzano) cambia il valore di riferimento.*
+*Documento aggiornato al 17 maggio 2026. Aggiornare quando: (a) un coefficiente fisico cambia in `engine/`, (b) si aggiungono incentivi o si rimuovono quelli citati, (c) un test di retrocompatibilità (Borzano) cambia il valore di riferimento.*

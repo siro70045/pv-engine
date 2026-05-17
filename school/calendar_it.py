@@ -3,13 +3,29 @@ school/calendar_it.py
 
 Italian school calendar for PV load profiling.
 Reference year: 2025 (non-leap, Jan 1 = Wednesday = DOW 2).
-Supports per-region calendars for all 21 Italian regions.
+
+Supports per-region calendars for the 20 Italian regions, with the
+Trentino-Alto Adige region split into its two autonomous provinces
+(Trento and Bolzano), which have distinct school calendars — yielding
+21 keys in REGIONAL_CALENDARS.
+
+Region classification from (lat, lon) uses official ISTAT regional
+polygons (school/data/regioni_istat.geojson, ~5 km simplified). The
+previous bounding-box approximation produced ~22% misclassification on
+a 94-city test set and was replaced on 2026-05-17 (anomaly #12).
 """
 
 from __future__ import annotations
 
+import json
 from datetime import date
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 import numpy as np
+
+if TYPE_CHECKING:
+    from shapely.geometry.base import BaseGeometry
 
 # ── Calendar constants ────────────────────────────────────────────────────────
 
@@ -145,99 +161,114 @@ REGIONAL_CALENDARS: dict[str, dict] = {
 }
 
 REGION_ALIASES: dict[str, str] = {
-    "trentino_alto_adige":   "trento",
+    # Linguistic alias only — Friuli-Venezia Giulia is a single region
+    # with one school calendar, so this mapping is safe.
     "friuli_venezia_giulia": "friuli_vg",
 }
 
+# Regions that cannot be aliased because they have multiple calendars
+# (must be specified explicitly).
+_AMBIGUOUS_REGIONS: dict[str, str] = {
+    "trentino_alto_adige":
+        "Per il Trentino-Alto Adige specifica 'trento' o 'bolzano': "
+        "le due province autonome hanno calendari scolastici distinti "
+        "(Bolzano ha la pausa autunnale lunga 30/10–08/11).",
+}
 
-# ── Coordinate → region lookup ────────────────────────────────────────────────
+
+# ── Coordinate → region lookup (ISTAT polygons) ───────────────────────────────
+
+# Map ISTAT region name (as in the GeoJSON `reg_name` property) to the
+# region key used by REGIONAL_CALENDARS. Trentino-Alto Adige is mapped
+# to a sentinel here and split into "trento"/"bolzano" by latitude in
+# region_from_coordinates (ISTAT GeoJSON has TAA as a single polygon).
+_ISTAT_NAME_TO_REGION_KEY: dict[str, str] = {
+    "Abruzzo":                       "abruzzo",
+    "Basilicata":                    "basilicata",
+    "Calabria":                      "calabria",
+    "Campania":                      "campania",
+    "Emilia-Romagna":                "emilia_romagna",
+    "Friuli-Venezia Giulia":         "friuli_vg",
+    "Lazio":                         "lazio",
+    "Liguria":                       "liguria",
+    "Lombardia":                     "lombardia",
+    "Marche":                        "marche",
+    "Molise":                        "molise",
+    "Piemonte":                      "piemonte",
+    "Puglia":                        "puglia",
+    "Sardegna":                      "sardegna",
+    "Sicilia":                       "sicilia",
+    "Toscana":                       "toscana",
+    "Trentino-Alto Adige/Südtirol":  "trentino_alto_adige",  # split by lat
+    "Umbria":                        "umbria",
+    "Valle d'Aosta/Vallée d'Aoste":  "valle_daosta",
+    "Veneto":                        "veneto",
+}
+
+# Latitude that separates Bolzano (north) from Trento (south).
+# Trento city: 46.07°N · Bolzano city: 46.50°N. The provincial border
+# runs roughly along 46.40°N; 46.45 keeps Bolzano city safely on its side.
+_TAA_SPLIT_LAT: float = 46.45
+
+# Module-level cache for polygons and spatial index.
+_ITALIAN_REGIONS: list[tuple[str, "BaseGeometry"]] = []
+_GEOJSON_PATH = Path(__file__).parent / "data" / "regioni_istat.geojson"
+
+
+def _load_italian_regions() -> list[tuple[str, "BaseGeometry"]]:
+    """Lazy-load ISTAT region polygons. Cached after first call."""
+    global _ITALIAN_REGIONS
+    if _ITALIAN_REGIONS:
+        return _ITALIAN_REGIONS
+
+    from shapely.geometry import shape
+
+    with _GEOJSON_PATH.open() as f:
+        gj = json.load(f)
+
+    polys: list[tuple[str, "BaseGeometry"]] = []
+    for feat in gj["features"]:
+        istat_name = feat["properties"]["reg_name"]
+        region_key = _ISTAT_NAME_TO_REGION_KEY[istat_name]
+        polys.append((region_key, shape(feat["geometry"])))
+
+    _ITALIAN_REGIONS = polys
+    return _ITALIAN_REGIONS
+
+
+def _resolve_taa(key: str, lat: float) -> str:
+    """Split the TAA sentinel into 'bolzano' or 'trento' by latitude."""
+    if key == "trentino_alto_adige":
+        return "bolzano" if lat > _TAA_SPLIT_LAT else "trento"
+    return key
+
 
 def region_from_coordinates(lat: float, lon: float) -> str:
     """
-    Stima la regione italiana da latitudine/longitudine.
-    Approssimazione a bounding-box — sufficiente per il calendario scolastico.
+    Italian region key for (lat, lon) using ISTAT regional polygons.
+
+    Returns one of the 21 keys in REGIONAL_CALENDARS. For points that
+    fall outside any Italian region polygon (sea, border, foreign land),
+    returns the nearest region by polygon distance.
+
+    Trentino-Alto Adige is split by latitude into the autonomous
+    provinces of Bolzano (north of ~46.45°N) and Trento (south), since
+    they have distinct school calendars.
     """
-    # Isole
-    if lat < 40.5 and lon > 12.0 and lon < 16.0:
-        return "sicilia"
-    if lat < 41.5 and lon > 8.0 and lon < 10.0:
-        return "sardegna"
+    from shapely.geometry import Point
 
-    # Bolzano / Trento
-    if lat > 46.2 and lon > 10.5 and lon < 12.5:
-        return "bolzano"
-    if lat > 45.7 and lat <= 46.5 and lon > 10.5 and lon < 12.0:
-        return "trento"
+    polys = _load_italian_regions()
+    pt    = Point(lon, lat)
 
-    # Friuli VG
-    if lat > 45.6 and lon > 12.8:
-        return "friuli_vg"
+    for key, poly in polys:
+        if poly.contains(pt):
+            return _resolve_taa(key, lat)
 
-    # Valle d'Aosta
-    if lat > 45.5 and lon < 7.8:
-        return "valle_daosta"
-
-    # Lombardia
-    if lat > 45.0 and lat < 46.5 and lon > 8.5 and lon < 11.4:
-        return "lombardia"
-
-    # Piemonte
-    if lat > 44.0 and lat < 46.0 and lon < 8.8 and lon > 6.5:
-        return "piemonte"
-
-    # Veneto
-    if lat > 45.0 and lat < 46.5 and lon > 11.0 and lon < 13.0:
-        return "veneto"
-
-    # Emilia-Romagna
-    if lat > 43.7 and lat < 45.2 and lon > 9.2 and lon < 12.8:
-        return "emilia_romagna"
-
-    # Liguria
-    if lat > 43.8 and lat < 44.5 and lon > 7.5 and lon < 10.0:
-        return "liguria"
-
-    # Toscana
-    if lat > 42.3 and lat < 44.5 and lon > 9.7 and lon < 12.4:
-        return "toscana"
-
-    # Marche
-    if lat > 42.8 and lat < 44.0 and lon > 12.2 and lon < 13.9:
-        return "marche"
-
-    # Umbria
-    if lat > 42.5 and lat < 43.6 and lon > 12.0 and lon < 13.2:
-        return "umbria"
-
-    # Lazio
-    if lat > 41.2 and lat < 42.8 and lon > 11.4 and lon < 14.0:
-        return "lazio"
-
-    # Abruzzo
-    if lat > 41.7 and lat < 42.9 and lon > 13.0 and lon < 14.8:
-        return "abruzzo"
-
-    # Molise
-    if lat > 41.4 and lat < 42.1 and lon > 14.0 and lon < 15.2:
-        return "molise"
-
-    # Campania
-    if lat > 40.0 and lat < 41.5 and lon > 13.8 and lon < 15.8:
-        return "campania"
-
-    # Basilicata
-    if lat > 39.9 and lat < 40.9 and lon > 15.3 and lon < 16.9:
-        return "basilicata"
-
-    # Puglia
-    if lat > 39.8 and lat < 42.2 and lon > 15.0 and lon < 18.6:
-        return "puglia"
-
-    # Calabria
-    if lat > 37.9 and lat < 40.1 and lon > 15.6 and lon < 17.2:
-        return "calabria"
-
-    return "lazio"   # default: centro Italia
+    # Fallback: nearest region polygon. Covers sea points (Sicilia
+    # offshore, Adriatic), border points, and any input outside Italy
+    # (which is then snapped to the closest Italian region).
+    nearest_key, _ = min(polys, key=lambda kp: kp[1].distance(pt))
+    return _resolve_taa(nearest_key, lat)
 
 
 # ── Vacation and holiday sets (legacy — 2025 reference) ──────────────────────
@@ -364,6 +395,8 @@ def _build_regional_vacations(
     Returns (vacation_doy_set, school_start_doy, school_end_doy).
     Easter vacation is computed for reference_year + 1 (second half of school year).
     """
+    if region in _AMBIGUOUS_REGIONS:
+        raise ValueError(_AMBIGUOUS_REGIONS[region])
     reg_key = REGION_ALIASES.get(region, region)
     reg     = REGIONAL_CALENDARS.get(reg_key, REGIONAL_CALENDARS["emilia_romagna"])
 

@@ -9,6 +9,7 @@ slowapi>=0.1.9
 requests>=2.31.0
 numpy>=1.26.0
 pandas>=2.0.0
+shapely>=2.0.0
 anthropic>=0.25.0
 
 # ── Streamlit legacy wizards (app.py, app_school.py) ──────────────────────────

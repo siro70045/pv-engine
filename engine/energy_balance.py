@@ -135,8 +135,11 @@ class GridTariff:
     Parameters
     ----------
     import_price_eur_kWh : float
-        Price paid for electricity drawn from the grid [€/kWh].
-        Can be a single flat rate, or use monthly/hourly arrays.
+        Base import price [€/kWh].
+        With time_of_use=False this is the single flat rate paid for every
+        kWh drawn from the grid.
+        With time_of_use=True this is the off-peak price; the peak price
+        during peak_hours is import_price_eur_kWh * peak_price_multiplier.
     export_price_eur_kWh : float
         Price received for electricity fed into the grid [€/kWh].
         - Net metering (scambio sul posto): effectively = import price
@@ -690,18 +693,25 @@ def _aggregate(
     # ── Financial calculation ─────────────────────────────────────────────
     tariff = inp.tariff
 
-    # Baseline cost: all demand imported from grid
-    # (uses average import price; TOU not applied to baseline for simplicity)
-    baseline_cost = dem_annual * tariff.import_price_eur_kWh
-
-    # Actual cost with PV: only grid_import is charged
-    # Time-of-use pricing: apply hourly
-    # Define hourly import price function (mirrors the one in _simulate_hourly)
+    # Hourly import price: base/off-peak rate, multiplied by
+    # peak_price_multiplier during peak_hours when time_of_use is enabled.
     def _import_price_at(hour_of_day: int) -> float:
         if tariff.time_of_use and hour_of_day in tariff.peak_hours:
             return tariff.import_price_eur_kWh * tariff.peak_price_multiplier
         return tariff.import_price_eur_kWh
 
+    # Baseline cost (no PV): all demand imported from grid.  Same tariff
+    # rule (flat or TOU) applied symmetrically to baseline and actual —
+    # see fix Voce #10 (Categoria 3) for the asymmetry bug rationale.
+    if tariff.time_of_use:
+        baseline_cost = 0.0
+        for i, rec in enumerate(hourly):
+            h = i % 24
+            baseline_cost += rec.demand_Wh / 1000.0 * _import_price_at(h)
+    else:
+        baseline_cost = dem_annual * tariff.import_price_eur_kWh
+
+    # Actual cost with PV: only grid_import is charged.
     if tariff.time_of_use:
         actual_cost = 0.0
         for i, rec in enumerate(hourly):

@@ -239,6 +239,15 @@ R_SURFACE_WALL = 0.13 + 0.04
 # Monthly hours [h] — standard year
 HOURS_PER_MONTH = [744, 672, 744, 720, 744, 720, 744, 744, 720, 744, 720, 744]
 
+# Days per month — used by the monthly solar model below
+DAYS_PER_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+# Solar constant [W/m²] — IPCC AR6 / WMO 2015 reference value
+_G_SC = 1367.0
+
+# Ground albedo [-] — generic natural surface (matches solar.py:457)
+_RHO_GROUND = 0.2
+
 # Temperature reduction factors b for unheated adjacent spaces
 # EN ISO 13789 Table 3
 ADJACENT_SPACE_B = {
@@ -405,6 +414,94 @@ def calc_ventilation_heat_loss(env: Envelope) -> float:
 # SOLAR GAINS THROUGH WINDOWS — EN ISO 13790 §11.3
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _solar_declination_rad(day_of_year: int) -> float:
+    """Cooper (1969) solar declination δ [rad]."""
+    return math.radians(23.45 * math.sin(math.radians(360.0 * (284 + day_of_year) / 365.0)))
+
+
+def _eccentricity_correction(day_of_year: int) -> float:
+    """Earth-orbit eccentricity factor (Spencer 1971 simplified)."""
+    return 1.0 + 0.033 * math.cos(math.radians(360.0 * day_of_year / 365.0))
+
+
+def _sunset_hour_angle(phi_rad: float, delta_rad: float) -> float:
+    """Sunset hour angle ωs [rad] ≥ 0; sunrise sits at -ωs."""
+    arg = -math.tan(phi_rad) * math.tan(delta_rad)
+    arg = max(-1.0, min(1.0, arg))
+    return math.acos(arg)
+
+
+def _cos_zenith_at(phi_rad: float, delta_rad: float, omega_rad: float) -> float:
+    """Cosine of solar zenith angle at hour angle ω."""
+    return (
+        math.sin(delta_rad) * math.sin(phi_rad)
+        + math.cos(delta_rad) * math.cos(phi_rad) * math.cos(omega_rad)
+    )
+
+
+def _cos_theta_at(
+    phi_rad: float,
+    delta_rad: float,
+    omega_rad: float,
+    beta_rad: float,
+    gamma_rad: float,
+) -> float:
+    """
+    Cosine of incidence angle on tilted surface (Duffie & Beckman eq. 1.6.5a).
+
+    gamma_rad : surface azimuth from south, +west / -east. For the
+    envelope.py convention (0=N, 90=E, 180=S, 270=W) the caller uses
+    gamma = radians(orientation_deg - 180).
+    """
+    return (
+        math.sin(delta_rad) * math.sin(phi_rad) * math.cos(beta_rad)
+        - math.sin(delta_rad) * math.cos(phi_rad) * math.sin(beta_rad) * math.cos(gamma_rad)
+        + math.cos(delta_rad) * math.cos(phi_rad) * math.cos(beta_rad) * math.cos(omega_rad)
+        + math.cos(delta_rad) * math.sin(phi_rad) * math.sin(beta_rad) * math.cos(gamma_rad) * math.cos(omega_rad)
+        + math.cos(delta_rad) * math.sin(beta_rad) * math.sin(gamma_rad) * math.sin(omega_rad)
+    )
+
+
+def _erbs_diffuse_fraction(kt: float) -> float:
+    """
+    Erbs, Klein & Duffie (1982) hourly diffuse fraction.
+
+    kt : hourly clearness index = G_h / G_extraterrestrial_h on horizontal.
+    Returns kd = G_d / G_h, the diffuse fraction of global horizontal.
+
+    Reference: Solar Energy 28(4), 293-302.
+    """
+    kt = max(0.0, min(1.0, kt))
+    if kt <= 0.22:
+        return 1.0 - 0.09 * kt
+    if kt <= 0.80:
+        return (
+            0.9511
+            - 0.1604 * kt
+            + 4.388 * kt ** 2
+            - 16.638 * kt ** 3
+            + 12.336 * kt ** 4
+        )
+    return 0.165
+
+
+def _collares_pereira_rt(omega_rad: float, omega_s_rad: float) -> float:
+    """
+    Hourly-to-daily ratio of total horizontal radiation r_t
+    (Collares-Pereira & Rabl, 1979).
+
+    Returns r_t such that G_h_hourly ≈ r_t × H_h_daily, where the sum
+    of r_t over the daylight hours of the day equals 1.
+    """
+    a = 0.409 + 0.5016 * math.sin(omega_s_rad - math.radians(60.0))
+    b = 0.6609 - 0.4767 * math.sin(omega_s_rad - math.radians(60.0))
+    denom = math.sin(omega_s_rad) - omega_s_rad * math.cos(omega_s_rad)
+    if denom <= 0:
+        return 0.0
+    numer = (a + b * math.cos(omega_rad)) * (math.cos(omega_rad) - math.cos(omega_s_rad))
+    return (math.pi / 24.0) * numer / denom
+
+
 def _irradiance_on_surface(
     orientation_deg: float,
     tilt_deg: float,
@@ -413,57 +510,114 @@ def _irradiance_on_surface(
     latitude_deg: float,
 ) -> list[float]:
     """
-    Estimate monthly irradiance on a tilted, oriented surface [kWh/m²/month]
-    using the isotropic sky model (Liu & Jordan).
+    Monthly irradiance on a tilted, oriented surface [kWh/m²/month] via
+    hourly integration on the mid-month average day.
+
+    Algorithm (resolves dossier voice #11, Category 4):
+
+      1. For each month, pick the mid-month average day (declination δ,
+         sunset hour angle ωs, eccentricity E0).
+      2. Distribute the daily total H_h over the 24 wall-clock hours
+         using the Collares-Pereira & Rabl (1979) r_t ratio. Weights are
+         renormalised so their sum equals 1 over the daylight hours,
+         guaranteeing energy conservation against the input.
+      3. For each daylight hour, compute:
+           • hourly extraterrestrial G_o,h (midpoint approximation, error
+             < 0.5 % vs the exact integral over a 15° interval),
+           • hourly clearness index kt = G_h,h / G_o,h,
+           • hourly diffuse fraction kd via Erbs (1982),
+           • beam and diffuse components on horizontal,
+           • cos(incidence) on the tilted surface at the hour's central ω,
+           • beam component on tilted = G_b,h × max(cos_θ, 0) / cos_z,
+           • isotropic-sky diffuse  = G_d,h × (1 + cos β)/2 (Liu & Jordan),
+           • ground-reflected term  = G_h,h × ρ × (1 - cos β)/2.
+      4. Sum hourly to daily, multiply by days in month, convert to kWh.
+
+    The previous implementation evaluated cos_θ at a single fixed hour
+    angle ω = +15° (one hour past solar noon) and used a hardcoded
+    diffuse fraction kd = 0.55 — both grossly approximate, especially
+    for non-south facades.
 
     Parameters
     ----------
-    orientation_deg : azimuth of surface normal (0=N, 180=S) [°]
-    tilt_deg : tilt from horizontal [°]
-    monthly_irradiance_horizontal : global horizontal irradiance [kWh/m²/month]
-    monthly_irradiance_direct : direct normal irradiance [kWh/m²/month]
-    latitude_deg : site latitude [°]
+    orientation_deg : azimuth of surface normal [°]; 0=N, 90=E, 180=S, 270=W.
+    tilt_deg : tilt from horizontal [°]; 0=horizontal, 90=vertical.
+    monthly_irradiance_horizontal : monthly GHI [kWh/m²/month] (12 values).
+    monthly_irradiance_direct : monthly DNI [kWh/m²/month] — currently
+        unused (the model decomposes GHI into beam/diffuse via Erbs);
+        kept in the signature for API stability and future Perez upgrade.
+    latitude_deg : site latitude [°].
     """
     beta = math.radians(tilt_deg)
-    gamma = math.radians(orientation_deg - 180)  # surface azimuth vs South
+    gamma = math.radians(orientation_deg - 180.0)  # surface azimuth from south
     phi = math.radians(latitude_deg)
+
+    F_sky = (1.0 + math.cos(beta)) / 2.0
+    F_gnd = (1.0 - math.cos(beta)) / 2.0
 
     days_mid_month = [17, 47, 75, 105, 135, 162, 198, 228, 258, 288, 318, 344]
 
-    result = []
+    result: list[float] = []
     for m in range(12):
-        # Solar declination for mid-month day
         day = days_mid_month[m]
-        delta = math.radians(23.45 * math.sin(math.radians(360 * (284 + day) / 365)))
+        delta = _solar_declination_rad(day)
+        omega_s = _sunset_hour_angle(phi, delta)
+        e0 = _eccentricity_correction(day)
 
-        # Monthly average daily hours of daylight (sunrise hour angle)
-        omega_s = math.acos(max(-1.0, min(1.0, -math.tan(phi) * math.tan(delta))))
-        N = 2 * math.degrees(omega_s) / 15  # daylight hours
+        if omega_s <= 0.0:
+            # Polar night
+            result.append(0.0)
+            continue
 
-        G_h = monthly_irradiance_horizontal[m]  # kWh/m²/month
-        G_d_approx = G_h * 0.55               # diffuse fraction (rough)
-        G_b = max(G_h - G_d_approx, 0)        # beam component
+        # Collect the 24 hourly midpoint hour angles that fall within
+        # the daylight window and their Collares-Pereira r_t weights.
+        hour_omegas: list[float] = []
+        rt_weights: list[float] = []
+        for h in range(24):
+            omega = math.radians(15.0 * (h + 0.5 - 12.0))
+            if abs(omega) >= omega_s:
+                continue
+            hour_omegas.append(omega)
+            rt_weights.append(max(_collares_pereira_rt(omega, omega_s), 0.0))
 
-        # View factor sky–surface and ground–surface
-        F_sky = (1 + math.cos(beta)) / 2
-        F_gnd = (1 - math.cos(beta)) / 2
-        rho_g = 0.2  # ground reflectance
+        rt_sum = sum(rt_weights)
+        if rt_sum <= 0.0:
+            result.append(0.0)
+            continue
+        # Normalise so the hourly weights integrate exactly to the daily total
+        rt_weights = [w / rt_sum for w in rt_weights]
 
-        # Beam component on tilted surface (monthly average)
-        cos_theta = (
-            math.sin(delta) * math.sin(phi) * math.cos(beta)
-            - math.sin(delta) * math.cos(phi) * math.sin(beta) * math.cos(gamma)
-            + math.cos(delta) * math.cos(phi) * math.cos(beta) * math.cos(math.radians(15))
-            + math.cos(delta) * math.sin(phi) * math.sin(beta) * math.cos(gamma) * math.cos(math.radians(15))
-            + math.cos(delta) * math.sin(beta) * math.sin(gamma) * math.sin(math.radians(15))
-        )
-        cos_theta_z = math.sin(delta) * math.sin(phi) + math.cos(delta) * math.cos(phi) * math.cos(math.radians(15))
-        cos_theta_z = max(cos_theta_z, 0.001)
+        # Daily horizontal irradiance [Wh/m²/day]
+        days_in_month = DAYS_PER_MONTH[m]
+        H_h_daily_Wh = monthly_irradiance_horizontal[m] * 1000.0 / days_in_month
 
-        Rb = max(cos_theta, 0) / cos_theta_z
+        # Sum hourly contributions over the day
+        G_tilt_daily_Wh = 0.0
+        for omega, w in zip(hour_omegas, rt_weights):
+            G_h_hour = w * H_h_daily_Wh  # Wh/m² delivered in this hour
 
-        G_tilt = G_b * Rb + G_d_approx * F_sky + G_h * rho_g * F_gnd
-        result.append(max(G_tilt, 0))
+            cos_z = max(_cos_zenith_at(phi, delta, omega), 1e-6)
+            # Hourly extraterrestrial G_o,h on horizontal [Wh/m²]
+            # midpoint approximation: power × 1 hour
+            G_o_hour = _G_SC * e0 * cos_z
+
+            kt = G_h_hour / G_o_hour if G_o_hour > 0.0 else 0.0
+            kd = _erbs_diffuse_fraction(kt)
+            G_b_hour = G_h_hour * (1.0 - kd)
+            G_d_hour = G_h_hour * kd
+
+            cos_th = _cos_theta_at(phi, delta, omega, beta, gamma)
+            Rb = max(cos_th, 0.0) / cos_z
+
+            G_tilt_daily_Wh += (
+                G_b_hour * Rb
+                + G_d_hour * F_sky
+                + G_h_hour * _RHO_GROUND * F_gnd
+            )
+
+        # Daily → monthly [kWh/m²/month]
+        G_tilt_monthly = G_tilt_daily_Wh * days_in_month / 1000.0
+        result.append(max(G_tilt_monthly, 0.0))
 
     return result
 

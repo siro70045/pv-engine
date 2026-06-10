@@ -9,13 +9,14 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2, `shapely>=2.0` (poligoni regionali 
 ## Struttura
 
 - `engine/` — `solar.py` (`BuildingFootprint`, `simulate_pv`, `simulate_pv_multi`), `pvgis_client.py`, `economics.py`, `energy_vectors.py`, `energy_balance.py`, `envelope.py`, `heat_pump.py`, `loads.py`, `scenarios.py`
-- `school/` — `calendar_it.py` (calendari regionali 21 regioni), `climate_zones.py` (zone A-F), `incentives_school.py`, `loads_school.py` (include day-of-week modulation)
+- `school/` — `calendar_it.py` (calendari regionali 21 regioni), `climate_zones.py` (zone A-F), `incentives_school.py`, `loads_school.py` (include day-of-week modulation), `comuni.py` (lookup 7.896 comuni con centroide + zona climatica ufficiale), `estimate_defaults.py` (default-filling per `/estimate` Livello 1)
+- `school/data/` — `regioni_istat.geojson` (poligoni regionali), `comuni_italiani.csv` (7.896 comuni ISTAT 2025 con centroidi + zona DPR 412/93; fonti e licenze in `school/data/README.md`; rigenerabile con `build_comuni_dataset.py`)
 - `api/` — `main.py` FastAPI (25 endpoint), `routers/` split per dominio (building, economics, loads, location, pv, simulate), `schemas/` Pydantic per dominio, `utils/`
 - `branding/` — `meridiana_theme.py` per restyling Streamlit
 - `app.py`, `app_school.py` — Streamlit dev tools (NON produzione)
 - `.streamlit/config.toml` — theme Streamlit base Meridiana
 - `schemas.py` (root) — schemi Pydantic condivisi legacy
-- `tests/` — 18 test pytest verdi (`test_loads_school_dow.py`, `test_multi_footprint.py`, `test_scenarios_level1.py`)
+- `tests/` — 176 test pytest verdi (loads/dow, multi-footprint, scenarios, envelope, TOU, region, comuni, estimate defaults)
 
 ## Decisioni architetturali
 
@@ -24,13 +25,30 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2, `shapely>=2.0` (poligoni regionali 
 - **Test prima del refactor**.
 - **Multi-edificio modulare** (Fase A V1.1 completata 3 mag 2026, commit `3f5ce7e`).
 
-## Stato attuale (13 mag 2026)
+## Stato attuale (10 giu 2026)
 
-- Motore validato, 18 test verdi
+- Motore validato, 176 test verdi
 - API FastAPI deployata su Railway (25 endpoint)
 - Production hardening: JSON logs, rate limiting, two-level TMY cache (`2704305`)
 - Multi-footprint support nel motore (`3f5ce7e`)
 - Restyling Streamlit Meridiana applicato (`1061604`)
+- `/estimate` Fase A completata (fondamenta libreria, 10 giu 2026): dataset comuni + `school/comuni.py` + `school/estimate_defaults.py`
+
+## Endpoint /estimate (stima preliminare Livello 1 sito Meridiana)
+
+Stima pubblica con 5 input form: Comune, tipologia scuola (4 voci: elementare/media/liceo/istituto tecnico-professionale), fascia studenti, fascia anno costruzione (con "non lo so"), potenza ipotizzata opzionale. Il range low/high è uno sweep reale su m²/studente, non un ±% cosmetico.
+
+**Fasatura**: **Fase A** (✅ 10 giu 2026) solo backend-libreria, nuovi file in `school/`, engine intoccato. **Fase B** (da fare): endpoint API `api/routers/estimate.py` + `api/schemas/estimate.py`, orchestrazione `get_cached_tmy` → `calc_school_loads` (×3 profili) → `auto_scenarios` → `run_simulation_school`; qui si risolve anche l'incoerenza 5.0 vs 5.5 m²/kWp (`api/schemas/pv.py:55` vs `buildings.py:342`). **Fase C** (da fare): frontend con autocomplete comuni (per questo `lookup_comune` è exact-match senza fuzzy).
+
+**Decisioni default (Sirot, giu 2026)** — codificate in `school/estimate_defaults.py`:
+- Mapping tipologia: elementare→primary, media→middle, liceo→high_classic, tecnico-professionale→high_tech (`university_dept` non esposto)
+- Fasce studenti → centro: <100→70, 100-300→200, 300-600→450, 600+→800
+- m²/studente (low/central/high): elementare 5.5/7.0/8.5, media 7.0/9.0/11.0, liceo 8.0/10.0/12.0, tecnico-prof 9.5/12.0/14.5 — bozza approvata, riferimento DM 18/12/1975, da validare contro Anagrafe Edilizia Scolastica. Nota: per liceo e tecnico-prof i valori centrali stanno al bordo alto delle tabelle 3/A-3/B del DM (liceo classico 6.65-9.70, scientifico 7.33-10.45, tecnico comm. 6.73-10.76, geometri 8.62-12.28 m²/alunno) — scelta deliberata per il parco edilizio reale.
+- Fasce anno → centro: pre-1960→1950, 1960-1980→1970, 1980-2000→1990, post-2000→2010, "non lo so"→1981 (default motore)
+- Bassa sensibilità: n_teachers=studenti//10, n_ata=studenti//30, has_gym=True sempre, has_canteen+full_time=True solo elementare, n_floors=2, roof_area=floor_area/n_floors
+- Caso campione di riferimento (test): media 300-600 → 450 studenti, area 3.150/4.050/4.950 m², tetto 1.575/2.025/2.475 m²
+
+**Dataset comuni** (`school/data/comuni_italiani.csv`): 7.896 comuni ISTAT 1/1/2025, centroidi da confini generalizzati ISTAT (CC BY 3.0 IT), zona climatica DPR 412/93 da tabella ENEA SolarItaly (vintage 5/7/2002, ultima pubblicata): 98,4 % match diretto, 128 fusioni post-2002 via nearest-neighbour (colonna `zona_fonte`). Omonimi gestiti (`lookup_comune` ritorna tutti i match, disambiguazione per provincia). Tempi misurati (10 giu, Mac locale): `calc_school_loads` ~14 ms, `run_simulation_school` ~212 ms → 3 run ≈ 0,7 s + 1 fetch TMY condiviso: range sostenibile su Railway senza pre-calcoli.
 
 ## Problemi noti
 

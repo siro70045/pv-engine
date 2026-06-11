@@ -11,12 +11,12 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2, `shapely>=2.0` (poligoni regionali 
 - `engine/` — `solar.py` (`BuildingFootprint`, `simulate_pv`, `simulate_pv_multi`), `pvgis_client.py`, `economics.py`, `energy_vectors.py`, `energy_balance.py`, `envelope.py`, `heat_pump.py`, `loads.py`, `scenarios.py`
 - `school/` — `calendar_it.py` (calendari regionali 21 regioni), `climate_zones.py` (zone A-F), `incentives_school.py`, `loads_school.py` (include day-of-week modulation), `comuni.py` (lookup 7.896 comuni con centroide + zona climatica ufficiale), `estimate_defaults.py` (default-filling per `/estimate` Livello 1)
 - `school/data/` — `regioni_istat.geojson` (poligoni regionali), `comuni_italiani.csv` (7.896 comuni ISTAT 2025 con centroidi + zona DPR 412/93; fonti e licenze in `school/data/README.md`; rigenerabile con `build_comuni_dataset.py`)
-- `api/` — `main.py` FastAPI (25 endpoint), `routers/` split per dominio (building, economics, loads, location, pv, simulate), `schemas/` Pydantic per dominio, `utils/`
+- `api/` — `main.py` FastAPI (26 endpoint), `routers/` split per dominio (building, economics, estimate, loads, location, pv, simulate), `schemas/` Pydantic per dominio, `utils/`
 - `branding/` — `meridiana_theme.py` per restyling Streamlit
 - `app.py`, `app_school.py` — Streamlit dev tools (NON produzione)
 - `.streamlit/config.toml` — theme Streamlit base Meridiana
 - `schemas.py` (root) — schemi Pydantic condivisi legacy
-- `tests/` — 176 test pytest verdi (loads/dow, multi-footprint, scenarios, envelope, TOU, region, comuni, estimate defaults)
+- `tests/` — 185 test pytest verdi (loads/dow, multi-footprint, scenarios, envelope, TOU, region, comuni, estimate defaults, estimate API)
 
 ## Decisioni architetturali
 
@@ -25,20 +25,30 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2, `shapely>=2.0` (poligoni regionali 
 - **Test prima del refactor**.
 - **Multi-edificio modulare** (Fase A V1.1 completata 3 mag 2026, commit `3f5ce7e`).
 
-## Stato attuale (10 giu 2026)
+## Stato attuale (11 giu 2026)
 
-- Motore validato, 176 test verdi
-- API FastAPI deployata su Railway (25 endpoint)
+- Motore validato, 185 test verdi
+- API FastAPI deployata su Railway (26 endpoint)
 - Production hardening: JSON logs, rate limiting, two-level TMY cache (`2704305`)
 - Multi-footprint support nel motore (`3f5ce7e`)
 - Restyling Streamlit Meridiana applicato (`1061604`)
 - `/estimate` Fase A completata (fondamenta libreria, 10 giu 2026): dataset comuni + `school/comuni.py` + `school/estimate_defaults.py`
+- `/estimate` Fase B completata (endpoint API, 11 giu 2026): `POST /estimate` pubblico, rate limit 5/min
 
 ## Endpoint /estimate (stima preliminare Livello 1 sito Meridiana)
 
 Stima pubblica con 5 input form: Comune, tipologia scuola (4 voci: elementare/media/liceo/istituto tecnico-professionale), fascia studenti, fascia anno costruzione (con "non lo so"), potenza ipotizzata opzionale. Il range low/high è uno sweep reale su m²/studente, non un ±% cosmetico.
 
-**Fasatura**: **Fase A** (✅ 10 giu 2026) solo backend-libreria, nuovi file in `school/`, engine intoccato. **Fase B** (da fare): endpoint API `api/routers/estimate.py` + `api/schemas/estimate.py`, orchestrazione `get_cached_tmy` → `calc_school_loads` (×3 profili) → `auto_scenarios` → `run_simulation_school`; qui si risolve anche l'incoerenza 5.0 vs 5.5 m²/kWp (`api/schemas/pv.py:55` vs `buildings.py:342`). **Fase C** (da fare): frontend con autocomplete comuni (per questo `lookup_comune` è exact-match senza fuzzy).
+**Fasatura**: **Fase A** (✅ 10 giu 2026) solo backend-libreria, nuovi file in `school/`, engine intoccato. **Fase B** (✅ 11 giu 2026): `POST /estimate` (`api/routers/estimate.py` + `api/schemas/estimate.py`), orchestrazione `lookup_comune` → `build_estimate_profiles` → `get_cached_tmy` (1 fetch condiviso) → `calc_school_loads` ×3 → `auto_scenarios` → `run_simulation_school` ×3; risolta anche l'incoerenza m²/kWp (5.0→5.5 in `api/schemas/pv.py`, allineato a `buildings.py`). **Fase C** (da fare): frontend `/scuole/stima` con autocomplete comuni (per questo `lookup_comune` è exact-match senza fuzzy); la pagina risultato si disegna sulla response campione Albinea (report Fase B) e sul campo `assunzioni` (blocco onestà).
+
+**Decisioni Fase B (Sirot, giu 2026)**:
+- Omonimi → 422 con lista candidati `{nome, provincia, regione}`; comune non trovato → 404; PVGIS giù → 503
+- **kWp FISSO nello sweep**: se l'utente non lo fornisce, taglia "recommended" da `auto_scenarios` sul profilo centrale (cap tetto via `kwp_from_area`, flat_roof_ballast 100%), poi identica nei tre run — l'impianto è la decisione, l'edificio è l'incertezza. Conseguenza voluta: `produzione_annua_kwh.low == high` (varia solo la domanda). `taglie_disponibili` (minimal/recommended/maximum) sempre in response come teaser Livello 2
+- Zona climatica e calendario regionale dal CSV ufficiale (NON `zone_from_latitude` / `region_from_coordinates`); Trentino-A.A. splittato per sigla TN/BZ
+- CO₂ evitata = solo autoconsumo (produzione − export) × 0.233 kg/kWh, fattore letto dal default di `BuildingEnergyProfile` (no duplicazione); payback clampato a 99 (mai-raggiunto → JSON valido)
+- Prezzi/parametri: default di `run_simulation_school` (0.22/0.08 €/kWh, 25 anni, capex da `estimate_pv_cost_school`); riscaldamento resta gas (stima PV-only, HP è Livello 2)
+- Tempi misurati (11 giu, Mac locale, TestClient): cold 2.3 s (fetch PVGIS), **warm 0.67 s** — sotto il secondo come richiesto
+- Test: mai PVGIS live (TMY sintetico pattern `test_multi_footprint`), limiter disabilitato nella fixture; sanity-anchor: domanda bottom-up del profilo centrale entro ±40% del benchmark ENEA (se fallisce → segnalare, non aggiustare)
 
 **Decisioni default (Sirot, giu 2026)** — codificate in `school/estimate_defaults.py`:
 - Mapping tipologia: elementare→primary, media→middle, liceo→high_classic, tecnico-professionale→high_tech (`university_dept` non esposto)

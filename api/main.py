@@ -146,6 +146,7 @@ from api.routers import loads as loads_router
 from api.routers import pv as pv_router
 from api.routers import economics as economics_router
 from api.routers import simulate as simulate_router
+from api.routers import estimate as estimate_router
 
 app.include_router(location_router.router)
 app.include_router(building_router.router)
@@ -153,6 +154,7 @@ app.include_router(loads_router.router)
 app.include_router(pv_router.router)
 app.include_router(economics_router.router)
 app.include_router(simulate_router.router)
+app.include_router(estimate_router.router)
 
 
 # ── Root + advanced health ────────────────────────────────────────────────────

@@ -52,7 +52,8 @@ class PVAutoSizeRequest(BaseModel):
         "residential", "school", "public", "warehouse", "office", "industrial"
     ] = "school"
     yield_kwh_per_kwp: float = Field(default=1200.0, gt=0)
-    m2_per_kwp: float = Field(default=5.0, gt=0, le=20)
+    # Aligned with buildings.kwp_from_area (~400 Wp panel + spacing)
+    m2_per_kwp: float = Field(default=5.5, gt=0, le=20)
     scenario: Literal["minimal", "recommended", "maximum", "all"] = "all"
 
 

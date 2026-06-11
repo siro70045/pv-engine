@@ -54,6 +54,9 @@ class EstimateResponse(BaseModel):
     taglie_disponibili: dict[Literal["minimal", "recommended", "maximum"], float]
     produzione_annua_kwh: RangeLowHigh
     risparmio_annuo_eur: RangeLowHigh
+    # Export revenue (energia immessa × prezzo cessione) — separate from
+    # risparmio: the engine's annual_saving_eur is import-side only
+    ricavi_cessione_eur_anno: RangeLowHigh
     payback_anni: RangeLowHigh
     co2_evitata_kg_anno: RangeLowHigh
     capex_indicativo_eur: float

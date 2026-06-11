@@ -93,7 +93,7 @@ _BASE_REQ = {
 
 _RANGE_FIELDS = [
     "produzione_annua_kwh", "risparmio_annuo_eur",
-    "payback_anni", "co2_evitata_kg_anno",
+    "ricavi_cessione_eur_anno", "payback_anni", "co2_evitata_kg_anno",
 ]
 
 
@@ -122,10 +122,31 @@ def test_happy_path_albinea(client):
     assert isinstance(body["assunzioni"], list) and len(body["assunzioni"]) >= 5
 
 
+def test_payback_coherent_with_total_benefit(client):
+    """CAPEX / (risparmio + ricavi cessione) ≈ payback semplice, per run.
+
+    Pairing: production is fixed, so the low-area building has LOW saving
+    (less self-consumption) but HIGH export revenue — and vice versa. The
+    engine payback uses 25-y cash flows (O&M −1 %/yr, escalation +3 %/yr),
+    so year-1 naive payback only approximates it: tolerance 20 %.
+    """
+    body = client.post("/estimate", json=_BASE_REQ).json()
+    capex = body["capex_indicativo_eur"]
+    saving = body["risparmio_annuo_eur"]
+    ricavi = body["ricavi_cessione_eur_anno"]
+    payback = body["payback_anni"]
+
+    benefit_low_building = saving["low"] + ricavi["high"]
+    benefit_high_building = saving["high"] + ricavi["low"]
+    assert capex / benefit_low_building == pytest.approx(payback["high"], rel=0.2)
+    assert capex / benefit_high_building == pytest.approx(payback["low"], rel=0.2)
+
+
 def test_assunzioni_mention_area_and_zone(client):
     body = client.post("/estimate", json=_BASE_REQ).json()
     text = " ".join(body["assunzioni"])
-    assert "4,050" in text or "4.050" in text or "4050" in text
+    assert "4.050" in text, "separatore migliaia italiano atteso (4.050)"
+    assert "4,050" not in text
     assert "DPR 412/93" in text
 
 

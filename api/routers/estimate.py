@@ -82,6 +82,11 @@ _CALENDAR_KEY_BY_REGIONE = {
 }
 
 
+def _fmt_it(value: float) -> str:
+    """Integer formatting with Italian thousands separator (4.050, not 4,050)."""
+    return f"{value:,.0f}".replace(",", ".")
+
+
 def _calendar_region_key(comune: Comune) -> str:
     if comune.regione.startswith("Trentino"):
         return "bolzano" if comune.sigla_provincia.upper() == "BZ" else "trento"
@@ -180,6 +185,7 @@ async def estimate(request: Request, req: EstimateRequest) -> EstimateResponse:
         runs[level] = {
             "prod": sim.solar_result.production_annual_kWh,
             "saving": eb.annual_saving_eur,
+            "export_revenue": eb.export_revenue_eur,
             "payback": min(sim.economics.payback_simple_yr, 99.0),
             # Avoided CO₂ = self-consumed PV only (production − export):
             # conservative, consistent with the engine's import-based accounting
@@ -206,9 +212,9 @@ async def estimate(request: Request, req: EstimateRequest) -> EstimateResponse:
         zona_label += " — comune nato da fusione, zona ereditata dal comune limitrofo"
 
     assunzioni = [
-        f"Superficie stimata: {areas['central']:,.0f} m² da {n_students} studenti "
+        f"Superficie stimata: {_fmt_it(areas['central'])} m² da {n_students} studenti "
         f"× {m2['central']:.1f} m²/studente (rif. DM 18/12/1975); il range "
-        f"{areas['low']:,.0f}–{areas['high']:,.0f} m² riflette l'incertezza "
+        f"{_fmt_it(areas['low'])}–{_fmt_it(areas['high'])} m² riflette l'incertezza "
         f"sull'edificio ({m2['low']:.1f}–{m2['high']:.1f} m²/studente)",
         f"Tipologia: {_TIPOLOGIA_LABELS[req.tipologia]}; palestra presente, "
         f"mensa e tempo pieno {'inclusi' if req.tipologia == 'elementare' else 'esclusi'}, "
@@ -221,8 +227,8 @@ async def estimate(request: Request, req: EstimateRequest) -> EstimateResponse:
         f"Impianto: {kwp:.1f} kWp su tetto piano (tilt 10°, esposizione sud), "
         + ("taglia consigliata calcolata sul fabbisogno stimato"
            if auto_dimensionato else "potenza indicata dall'utente"),
-        f"CAPEX indicativo da listino scuole pubbliche: €{capex:,.0f} "
-        f"(inclusa verifica strutturale €{structural:,.0f}), IVA inclusa",
+        f"CAPEX indicativo da listino scuole pubbliche: €{_fmt_it(capex)} "
+        f"(inclusa verifica strutturale €{_fmt_it(structural)}), IVA inclusa",
         f"Prezzi energia: 0,22 €/kWh acquisto, 0,08 €/kWh cessione; "
         f"orizzonte 25 anni con degrado 0,5 %/anno",
         f"CO₂ evitata calcolata sul solo autoconsumo, fattore rete italiana "
@@ -243,6 +249,7 @@ async def estimate(request: Request, req: EstimateRequest) -> EstimateResponse:
         taglie_disponibili={k: round(v, 1) for k, v in taglie.items()},
         produzione_annua_kwh=_range("prod", 0),
         risparmio_annuo_eur=_range("saving", 0),
+        ricavi_cessione_eur_anno=_range("export_revenue", 0),
         payback_anni=_range("payback", 1),
         co2_evitata_kg_anno=_range("co2", 0),
         capex_indicativo_eur=float(capex),

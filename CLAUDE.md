@@ -58,6 +58,8 @@ Stima pubblica con 5 input form: Comune, tipologia scuola (4 voci: elementare/me
 - Bassa sensibilità: n_teachers=studenti//10, n_ata=studenti//30, has_gym=True sempre, has_canteen+full_time=True solo elementare, n_floors=2, roof_area=floor_area/n_floors
 - Caso campione di riferimento (test): media 300-600 → 450 studenti, area 3.150/4.050/4.950 m², tetto 1.575/2.025/2.475 m²
 
+**Nota riproducibilità TMY (indagine 12 giu 2026)**: TMY PVGIS verificato stabile alla fonte (12 giu 2026, refetch SHA-identico allo snapshot dell'11 giu); la cache `/tmp/pvgis_cache` su Railway muore a ogni deploy ma il primo fetch ricostruisce dati identici. Il pinning resta una buona idea come assicurazione per *futuri* aggiornamenti PVGIS, non come fix di questo episodio. Esito indagine: i valori di `/estimate` dipendono dalla fascia anno — per Albinea media 300-600 l'auto-dimensionamento dà 57 kWp (pre-1980 o "non lo so") vs 58 kWp (post-1980), da cui 68.052 vs 69.246 kWh — entrambe le misurazioni erano corrette, nessuna regressione tra i deploy.
+
 **Dataset comuni** (`school/data/comuni_italiani.csv`): 7.896 comuni ISTAT 1/1/2025, centroidi da confini generalizzati ISTAT (CC BY 3.0 IT), zona climatica DPR 412/93 da tabella ENEA SolarItaly (vintage 5/7/2002, ultima pubblicata): 98,4 % match diretto, 128 fusioni post-2002 via nearest-neighbour (colonna `zona_fonte`). Omonimi gestiti (`lookup_comune` ritorna tutti i match, disambiguazione per provincia). Tempi misurati (10 giu, Mac locale): `calc_school_loads` ~14 ms, `run_simulation_school` ~212 ms → 3 run ≈ 0,7 s + 1 fetch TMY condiviso: range sostenibile su Railway senza pre-calcoli.
 
 ## Problemi noti

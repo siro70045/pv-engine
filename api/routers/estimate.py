@@ -231,8 +231,6 @@ async def estimate(request: Request, req: EstimateRequest) -> EstimateResponse:
         f"(inclusa verifica strutturale €{_fmt_it(structural)}), IVA inclusa",
         f"Prezzi energia: 0,22 €/kWh acquisto, 0,08 €/kWh cessione; "
         f"orizzonte 25 anni con degrado 0,5 %/anno",
-        f"CO₂ evitata calcolata sul solo autoconsumo, fattore rete italiana "
-        f"{_CO2_KG_PER_KWH} kg CO₂/kWh (ENTSO-E 2024)",
         "Stima preliminare automatica: i valori reali dipendono dall'edificio "
         "specifico e richiedono l'analisi di Livello 2",
     ]

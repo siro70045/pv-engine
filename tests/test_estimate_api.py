@@ -148,6 +148,9 @@ def test_assunzioni_mention_area_and_zone(client):
     assert "4.050" in text, "separatore migliaia italiano atteso (4.050)"
     assert "4,050" not in text
     assert "DPR 412/93" in text
+    # CO₂ methodology is reserved for the Level-2 report (Sirot, giu 2026):
+    # the response field stays, but no assumption may explain the factor.
+    assert "CO₂" not in text and "ENTSO" not in text
 
 
 # ── Comune resolution ─────────────────────────────────────────────────────────

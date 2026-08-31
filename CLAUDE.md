@@ -16,7 +16,7 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2, `shapely>=2.0` (poligoni regionali 
 - `app.py`, `app_school.py` — Streamlit dev tools (NON produzione)
 - `.streamlit/config.toml` — theme Streamlit base Meridiana
 - `schemas.py` (root) — schemi Pydantic condivisi legacy
-- `tests/` — 185 test pytest verdi (loads/dow, multi-footprint, scenarios, envelope, TOU, region, comuni, estimate defaults, estimate API)
+- `tests/` — 195 test pytest verdi (loads/dow, multi-footprint, scenarios, envelope, TOU, region, comuni, estimate defaults, estimate API, residential profile calibration)
 
 ## Decisioni architetturali
 
@@ -25,15 +25,16 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2, `shapely>=2.0` (poligoni regionali 
 - **Test prima del refactor**.
 - **Multi-edificio modulare** (Fase A V1.1 completata 3 mag 2026, commit `3f5ce7e`).
 
-## Stato attuale (11 giu 2026)
+## Stato attuale (31 ago 2026)
 
-- Motore validato, 185 test verdi
+- Motore validato, 195 test verdi
 - API FastAPI deployata su Railway (26 endpoint)
 - Production hardening: JSON logs, rate limiting, two-level TMY cache (`2704305`)
 - Multi-footprint support nel motore (`3f5ce7e`)
 - Restyling Streamlit Meridiana applicato (`1061604`)
 - `/estimate` Fase A completata (fondamenta libreria, 10 giu 2026): dataset comuni + `school/comuni.py` + `school/estimate_defaults.py`
 - `/estimate` Fase B completata (endpoint API, 11 giu 2026): `POST /estimate` pubblico, rate limit 5/min
+- Pivot residenziale FASE 0 completata (31 ago 2026, commit `14d0842`): profilo `residential_working_family` in `engine/loads.py`, calibrato su bolletta reale ARERA
 
 ## Endpoint /estimate (stima preliminare Livello 1 sito Meridiana)
 
@@ -61,6 +62,26 @@ Stima pubblica con 5 input form: Comune, tipologia scuola (4 voci: elementare/me
 **Nota riproducibilità TMY (indagine 12 giu 2026)**: TMY PVGIS verificato stabile alla fonte (12 giu 2026, refetch SHA-identico allo snapshot dell'11 giu); la cache `/tmp/pvgis_cache` su Railway muore a ogni deploy ma il primo fetch ricostruisce dati identici. Il pinning resta una buona idea come assicurazione per *futuri* aggiornamenti PVGIS, non come fix di questo episodio. Esito indagine: i valori di `/estimate` dipendono dalla fascia anno — per Albinea media 300-600 l'auto-dimensionamento dà 57 kWp (pre-1980 o "non lo so") vs 58 kWp (post-1980), da cui 68.052 vs 69.246 kWh — entrambe le misurazioni erano corrette, nessuna regressione tra i deploy.
 
 **Dataset comuni** (`school/data/comuni_italiani.csv`): 7.896 comuni ISTAT 1/1/2025, centroidi da confini generalizzati ISTAT (CC BY 3.0 IT), zona climatica DPR 412/93 da tabella ENEA SolarItaly (vintage 5/7/2002, ultima pubblicata): 98,4 % match diretto, 128 fusioni post-2002 via nearest-neighbour (colonna `zona_fonte`). Omonimi gestiti (`lookup_comune` ritorna tutti i match, disambiguazione per provincia). Tempi misurati (10 giu, Mac locale): `calc_school_loads` ~14 ms, `run_simulation_school` ~212 ms → 3 run ≈ 0,7 s + 1 fetch TMY condiviso: range sostenibile su Railway senza pre-calcoli.
+
+## Pivot residenziale (B2C case)
+
+**Contesto strategico (ago 2026)**: dopo l'incontro col Comune di Albinea, il focus si sposta dalle scuole/PA ai privati cittadini. Modello di business: stima gratuita (numero + margine di incertezza), PDF approfondimento a pagamento, donazione facoltativa. Il motore è già adatto (PV + HP + economics): mancano i default residenziali e il layer di incentivi domestici.
+
+**FASE 0 ✅ COMPLETATA (31 ago 2026, commit `14d0842`)** — Profilo di carico "working_family":
+- Aggiunto `"residential_working_family"` a `engine/loads.py` (`_OCC_PROFILES` + `_LIGHT_PROFILES` + `BENCH`). Famiglia con adulti al lavoro e figli a scuola: occupazione diurna bassa (0.32-0.45 in F1), base notturna alta (0.50-0.55 per always-on: fridge/modem/standby), picco serale h17-22 portato principalmente dal profilo luci (identico a `"residential"`).
+- Calibrato su bolletta reale (Borzano, 4 persone, gas ACS/riscaldamento/cucina, 1.435 kWh/anno): target ARERA F1/F2/F3 = 28/33/39 %; ottenuto **F1=26.9 % / F2=36.1 % / F3=37.0 %** — entro ±4 pp su tutte le fasce (delibera ARERA 268/2015/R/EEL).
+- Profilo `"residential"` storico **INVARIATO** (pensionati / single / chiunque a casa tutto il giorno).
+- 9 nuovi test (`tests/test_residential_working_family_profile.py`); 195/195 verdi; numeri canonici Borzano bit-perfect.
+
+⚠ **Nota di calibrazione**: profilo tarato su un solo caso a basso consumo (1.435 kWh/anno). Famiglie a consumo medio-alto (2.500-4.000 kWh/anno, lavatrice/lavastoviglie diurne) possono avere una firma F1 diversa. Da rivalidare con 2-3 bollette reali a consumo più alto prima di considerarlo rappresentativo del parco residenziale generale.
+
+**FASE 1 (da fare)** — Backend residenziale:
+- Nuovo package `residential/` con:
+  - `estimate_defaults.py`: proxy consumo da n_persone / m² / tipologia riscaldamento / presenza EV
+  - `incentives.py`: detrazione IRPEF 50 % + Reddito Energetico (fasce ISEE basse)
+- Endpoint `POST /estimate/casa` (clona il pattern `api/routers/estimate.py`); input = bolletta annua reale **oppure** proxy da form (opzione C)
+- Scenario con/senza batteria affiancato al solo PV
+- **Decisione aperta**: come l'utente sceglie il profilo di presenza diurna — dropdown esplicito `"sempre_in_casa" / "lavoro_fuori"` vs. inference da n_persone e tipologia abitazione. Il profilo guida l'autoconsumo stimato e impatta il payback: non è un dettaglio estetico.
 
 ## Problemi noti
 
@@ -131,6 +152,7 @@ Gravità: bassissima.
 - `35de0de` (17 mag 2026) test(envelope): coverage suite as baseline for voice #11 fix (Phase 2A)
 - `1b2b302` (17 mag 2026) fix(envelope): Simpson hourly cos_theta + Erbs diffuse fraction (Phase 2B — Voce #11 ✅ chiusa, Categoria 4 ✅ chiusa)
 - `2a885b9` (17 mag 2026) docs(methodology): document envelope solar model + voice #11 close
+- `14d0842` (31 ago 2026) feat(engine): add residential_working_family load profile (serale, calibrato su firma ARERA reale)
 
 ## Come usare questo file
 

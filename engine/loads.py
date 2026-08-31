@@ -85,8 +85,13 @@ class OccupancySchedule:
     Parameters
     ----------
     building_type : str
-        One of: "residential", "office", "warehouse", "factory_light",
-        "factory_heavy", "retail", "school", "hotel".
+        One of: "residential", "residential_working_family", "office",
+        "warehouse", "factory_light", "factory_heavy", "retail",
+        "school", "hotel".
+        Use "residential_working_family" for households where adults and
+        children are away from home on weekdays (work/school), with a
+        strong evening peak. Use "residential" for retired occupants or
+        anyone home most of the day.
     n_occupants : int
         Full-time equivalent occupants (residents, workers, etc.).
     occupied_hours_weekday : list[float]
@@ -412,10 +417,55 @@ class LoadsResult:
 _OCC_PROFILES: dict[str, dict[str, list[float]]] = {
     "residential": {
         # Home all day (conservative — some leave for work)
+        # Suitable for retired occupants or households with someone always home.
         "weekday": [0.8,0.8,0.8,0.8,0.8,0.8,0.9,0.6,0.3,0.2,0.2,0.2,
                     0.3,0.2,0.2,0.2,0.3,0.5,0.7,0.8,0.9,0.9,0.9,0.9],
         "weekend": [0.9,0.9,0.9,0.9,0.9,0.9,0.9,0.8,0.7,0.6,0.6,0.6,
                     0.7,0.7,0.7,0.7,0.8,0.8,0.9,0.9,0.9,0.9,0.9,0.9],
+    },
+    "residential_working_family": {
+        # Adults at work / children at school on weekdays: house semi-empty 8-17,
+        # strong evening presence 17-22. Nighttime base (0.50-0.55) models
+        # always-on appliance loads: fridge (~150 W), router, standby — these
+        # run 24/7 regardless of occupancy and dominate a low-electricity
+        # household. The lighting profile (separate, unchanged from "residential")
+        # carries the visible evening peak; this occupancy profile governs the
+        # appliance/ventilation layer and is calibrated so the COMBINED output
+        # from calc_loads() reproduces the measured ARERA distribution.
+        #
+        # ARERA calibration: real Borzano bill (4 persons, gas heating/DHW/cooking,
+        # 1 435 kWh/yr). Target F1/F2/F3 = 28/33/39 %;
+        # achieved F1=26.9 / F2=36.1 / F3=37.0 % — within ±4 pp on all bands.
+        # Sources: TERNA profili-tipo domestici; ARERA delibera 268/2015/R/EEL;
+        # calibration by Sirot (2026-08). Profile "residential" remains valid for
+        # retirees or single-earner households with someone always home.
+        "weekday": [0.55,0.50,0.50,0.50,0.50,0.55,  # 0-5  F3 night (always-on)
+                    0.60,                              # 6    F3 pre-alarm
+                    0.50,                              # 7    F2 morning rush
+                    0.40,                              # 8    F1 leaving
+                    0.35,0.35,0.35,                    # 9-11 F1 empty+always-on
+                    0.45,                              # 12   F1 lunch
+                    0.35,                              # 13   F1
+                    0.32,0.32,0.40,                    # 14-16 F1
+                    0.50,                              # 17   F1 kids return
+                    0.58,                              # 18   F1 dinner prep
+                    0.50,                              # 19   F2 dinner
+                    0.55,                              # 20   F2 TV/peak
+                    0.50,                              # 21   F2 relax
+                    0.40,                              # 22   F2 wind down
+                    0.55],                             # 23   F3 late
+        "weekend": [0.55,0.50,0.50,0.50,0.50,0.55,  # 0-5  F3 night
+                    0.50,                              # 6    F3 slow wake-up
+                    0.52,                              # 7    F2(sat)/F3(sun)
+                    0.60,                              # 8
+                    0.65,0.65,0.63,                    # 9-11
+                    0.65,                              # 12   lunch
+                    0.60,                              # 13
+                    0.55,0.53,0.53,                    # 14-16 afternoon
+                    0.55,0.60,                         # 17-18
+                    0.58,0.62,0.58,                    # 19-21 F2(sat)/F3(sun)
+                    0.52,                              # 22
+                    0.55],                             # 23   F3
     },
     "office": {
         "weekday": [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.1,0.7,0.9,0.9,0.9,
@@ -465,6 +515,17 @@ _OCC_PROFILES: dict[str, dict[str, list[float]]] = {
 # Lighting ON profiles (fraction of installed power active each hour)
 _LIGHT_PROFILES: dict[str, dict[str, list[float]]] = {
     "residential": {
+        "weekday": [0.0,0.0,0.0,0.0,0.0,0.1,0.3,0.2,0.1,0.1,0.1,0.1,
+                    0.1,0.1,0.1,0.2,0.3,0.5,0.7,0.8,0.8,0.7,0.5,0.2],
+        "weekend": [0.0,0.0,0.0,0.0,0.0,0.0,0.1,0.2,0.3,0.2,0.2,0.2,
+                    0.2,0.2,0.2,0.3,0.4,0.6,0.7,0.8,0.8,0.7,0.5,0.2],
+    },
+    "residential_working_family": {
+        # Same lighting shape as "residential": occupants use lights in the
+        # morning and evening regardless of whether they spend the day at home.
+        # The occupancy profile (not the lighting) carries the working-hours
+        # reduction; keeping lighting identical simplifies calibration and avoids
+        # overconcentrating load in the F2 evening band.
         "weekday": [0.0,0.0,0.0,0.0,0.0,0.1,0.3,0.2,0.1,0.1,0.1,0.1,
                     0.1,0.1,0.1,0.2,0.3,0.5,0.7,0.8,0.8,0.7,0.5,0.2],
         "weekend": [0.0,0.0,0.0,0.0,0.0,0.0,0.1,0.2,0.3,0.2,0.2,0.2,
@@ -813,7 +874,8 @@ def _benchmark_appliances(inp: LoadsInput) -> list[float]:
     """
     # Specific annual load [kWh/m²/yr] by building type
     BENCH: dict[str, float] = {
-        "residential":   30.0,   # appliances + electronics per m²
+        "residential":              30.0,   # appliances + electronics per m²
+        "residential_working_family": 30.0,   # same benchmark, different shape
         "office":        20.0,   # computers, printers, servers, coffee
         "warehouse":      5.0,   # minimal plug loads
         "factory_light": 15.0,   # tools, compressors, conveyors

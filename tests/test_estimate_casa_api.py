@@ -540,3 +540,161 @@ class TestBorzanoAutosufficienza:
         as_pct = vp["autosufficienza_pct"]
         if as_pct < 35.0 and vp["etichetta"] != "negativo":
             assert "⚠" in vp["testo"] or "autosufficienza" in vp["testo"].lower()
+
+
+# ── 18. Auto-sizing su NPV ────────────────────────────────────────────────────
+
+class TestAutoSizingNPV:
+    def test_kwp_consigliata_e_kwp_ipotizzato_coerenti(self, client):
+        """Quando auto_dimensionato, kwp_ipotizzato deve coincidere con la taglia
+        che ha label 'consigliata' nel ventaglio — indipendentemente dal TMY usato."""
+        # Use a higher consumption to avoid all-exceed-cap edge cases in synthetic TMY
+        body = client.post("/estimate/casa", json={
+            **_BASE_PROXY,
+            "bolletta_kwh": 3_500.0,
+        }).json()
+        assert body["auto_dimensionato"] is True
+        kwp_ip = body["kwp_ipotizzato"]
+        consigliata = next(
+            (t for t in body["taglie_confronto"] if t["label"] == "consigliata"),
+            None,
+        )
+        assert consigliata is not None, "Deve esserci una taglia 'consigliata'"
+        assert abs(consigliata["kwp"] - kwp_ip) < 0.1, (
+            f"kwp_ipotizzato={kwp_ip} ma consigliata.kwp={consigliata['kwp']}"
+        )
+
+    def test_consigliata_ha_npv_migliore_nel_cap(self, client):
+        """Consigliata ha NPV ≥ tutte le taglie del ventaglio che rientrano nel cap (≤150% consumo)."""
+        body = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
+        tc = body["taglie_confronto"]
+        consigliata = next(t for t in tc if t["label"] == "consigliata")
+        npv_c = consigliata["npv_eur"]
+        consumo = body["consumo_kwh_annuo"]
+        cap_ratio = 1.50
+        # Only check candidates within cap (the consigliata must have best NPV among those)
+        in_cap = [t for t in tc if t["produzione_annua_kwh"] / consumo <= cap_ratio + 0.01]
+        for t in in_cap:
+            assert t["npv_eur"] <= npv_c + 1.0, (
+                f"Taglia {t['kwp']} kWp (nel cap, label={t['label']}) ha NPV {t['npv_eur']} "
+                f"> consigliata NPV {npv_c}"
+            )
+
+    def test_kwp_ipotizzato_non_negativo_se_esiste_positivo(self, client):
+        """Se almeno una taglia ha NPV > 0, kwp_ipotizzato non è l'unica negativa."""
+        body = client.post("/estimate/casa", json={
+            **_BASE_PROXY,
+            "bolletta_kwh": 3_000.0,  # consumo medio: taglie medie convengono
+        }).json()
+        tc = body["taglie_confronto"]
+        npvs = {t["label"]: t["npv_eur"] for t in tc}
+        # Se almeno un NPV > 0, la consigliata deve avere NPV > 0
+        if any(v > 0 for v in npvs.values()):
+            consigliata_npv = npvs.get("consigliata", -9999)
+            assert consigliata_npv > 0, (
+                f"Almeno una taglia ha NPV > 0 ma consigliata ha NPV={consigliata_npv}"
+            )
+
+    def test_all_negative_verdetto_dice_nessuna_taglia(self, client):
+        """Consumo molto basso + impianto non sovradimensionato → all taglie negative.
+        Il verdetto deve contenere 'Nessuna taglia' o la stringa equivalente."""
+        # Con bolletta 200 kWh (quasi nulla) e auto-sizing, tutte le taglie
+        # minime (1.5+ kWp) avranno NPV negativo sul TMY sintetico.
+        body = client.post("/estimate/casa", json={
+            **_BASE_PROXY,
+            "bolletta_kwh": 200.0,
+        }).json()
+        vp = body["verdetto_pv"]
+        if vp["etichetta"] == "negativo":
+            # Se tutte le taglie sono negative: il testo deve dirlo esplicitamente
+            tc = body["taglie_confronto"]
+            tutti_negativi = all(t["npv_eur"] <= 0 for t in tc)
+            if tutti_negativi and body["auto_dimensionato"]:
+                assert "Nessuna taglia" in vp["testo"] or "nessuna taglia" in vp["testo"]
+
+    def test_user_kwp_non_soggetto_a_npv_selection(self, client):
+        """Se l'utente specifica potenza_kwp, kwp_ipotizzato = quello specificato
+        (anche se non è il migliore NPV)."""
+        body = client.post("/estimate/casa", json={
+            **_BASE_BOLLETTA,
+            "potenza_kwp": 2.0,
+        }).json()
+        assert body["auto_dimensionato"] is False
+        assert body["kwp_ipotizzato"] == pytest.approx(2.0, abs=0.05)
+
+
+# ── 19. Cap sovradimensionamento (150%) ───────────────────────────────────────
+
+class TestCapSovradimensionamento:
+    def test_borzano_consigliata_non_e_max_taglia(self, client):
+        """Con 1.435 kWh/anno, la taglia MAX del ventaglio NON deve essere 'consigliata'
+        (il cap 150% la esclude; se tutte eccedono il cap, si usa la MINIMA, non la massima)."""
+        body = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
+        assert body["auto_dimensionato"] is True
+        tc = body["taglie_confronto"]
+        consigliata = next(t for t in tc if t["label"] == "consigliata")
+        max_kwp = max(t["kwp"] for t in tc)
+        # When consumo=1435 kWh, the max taglia overshoots far more than the min.
+        # Cap logic should select the SMALLEST available (not the largest).
+        assert consigliata["kwp"] < max_kwp or len(tc) == 1, (
+            f"Con consumo 1435 kWh, la taglia massima ({max_kwp} kWp) è consigliata: "
+            "il cap dovrebbe selezionare una taglia più piccola"
+        )
+
+    def test_borzano_verdetto_negativo_con_messaggio_sensato(self, client):
+        """Con 1.435 kWh/anno, se la consigliata (nel cap) ha NPV < 0, il verdetto dice
+        esplicitamente che nessuna taglia sensata è conveniente."""
+        body = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
+        vp = body["verdetto_pv"]
+        if vp["etichetta"] == "negativo" and body["auto_dimensionato"]:
+            # Must mention that no "sensata" size is convenient, not just "difficile"
+            testo = vp["testo"]
+            assert (
+                "sensata" in testo.lower()
+                or "150%" in testo
+                or "Nessuna taglia" in testo
+            ), f"Verdetto negativo manca del messaggio esplicito sul cap. Testo: {testo[:200]}"
+
+    def test_alto_consumo_consigliata_nel_cap(self, client):
+        """Con 7.400 kWh/anno, tutti i candidati sono entro il cap (6.5 kWp = 118%):
+        la consigliata può essere qualunque taglia. Verifichiamo che sia nel cap."""
+        body = client.post("/estimate/casa", json={
+            **_BASE_PROXY,
+            "bolletta_kwh": 7_400.0,
+        }).json()
+        tc = body["taglie_confronto"]
+        consigliata = next(t for t in tc if t["label"] == "consigliata")
+        consumo = body["consumo_kwh_annuo"]
+        ratio = consigliata["produzione_annua_kwh"] / consumo
+        assert ratio <= 1.50 + 0.01, (
+            f"Consigliata {consigliata['kwp']} kWp eccede il cap: {ratio:.1%}"
+        )
+
+    def test_sovradimensionamento_warning_in_verdetto_di_taglia(self, client):
+        """Taglie che producono > 150% del consumo mostrano avvertenza nel verdetto."""
+        body = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
+        consumo = body["consumo_kwh_annuo"]
+        cap_ratio = 1.50
+        for t in body["taglie_confronto"]:
+            prod_ratio = t["produzione_annua_kwh"] / consumo
+            if prod_ratio > cap_ratio + 0.01:
+                vt = t["verdetto"]["testo"]
+                assert "×" in vt or "rete" in vt.lower() or "fragil" in vt.lower(), (
+                    f"Taglia {t['kwp']} kWp (prod_ratio={prod_ratio:.1f}x) senza avvertenza "
+                    f"di sovradimensionamento nel testo: {vt[:150]}"
+                )
+
+    def test_user_kwp_sovradimensionato_mostra_avvertenza(self, client):
+        """Se l'utente impone una taglia che produce > 150% del consumo,
+        il verdetto_pv lo segnala esplicitamente."""
+        body = client.post("/estimate/casa", json={
+            **_BASE_PROXY,
+            "bolletta_kwh": 1_435.0,
+            "potenza_kwp": 6.5,  # produces ~8766 kWh vs 1435 kWh = 611%
+        }).json()
+        vp = body["verdetto_pv"]
+        testo = vp["testo"]
+        # deve contenere avvertenza di sovradimensionamento (×, rete, fragil...)
+        assert "×" in testo or "rete" in testo.lower() or "fragil" in testo.lower(), (
+            f"Taglia user-defined 6.5 kWp (611% consumo) senza avvertenza. Testo: {testo[:200]}"
+        )

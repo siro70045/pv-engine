@@ -5,12 +5,13 @@ Assembles the three residential/ modules into a single response:
     lookup_comune → get_cached_tmy →
     [proxy OR bolletta] consumption estimate →
     calc_loads (profile shape) →
-    simulate_pv →
-    compare_battery_scenarios ×3 (low/central/high demand) →
-    verdetto onesto
+    simulate_pv (recommended kWp) →
+    compare_battery_scenarios ×2 (low/high demand for range) +
+    compare_battery_scenarios ×2-3 (taglie_confronto, central demand) →
+    verdetto onesto (pesa autosufficienza + economics)
 
-PV kWp is FIXED across the three demand runs (same decision, building
-consumption is the uncertainty).  Battery taglia scales with central demand.
+PV kWp is FIXED across demand runs (same decision, building consumption is
+the uncertainty).  Battery taglia scales with central demand.
 
 Constraints (non-negotiable):
   - ammortamento_accelerato = False, transizione_5_0_pct = 0.0
@@ -24,6 +25,7 @@ import dataclasses
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, status
 
@@ -33,9 +35,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from api.schemas.estimate import CandidatoComune, ComuneRisolto, RangeLowHigh
 from api.schemas.estimate_casa import (
+    BeneficioBreakdown,
     EstimateCasaRequest,
     EstimateCasaResponse,
     ScenarioOut,
+    TagliaOut,
     TradeoffOut,
     VerdettoPV,
 )
@@ -75,6 +79,9 @@ _BATTERY_KWH_TIERS = [
     (float("inf"), 7.0),
 ]
 
+# Autosufficienza threshold: below this, verdict notes low energy independence
+_AUTOSUFFICIENZA_AVVERTENZA_SOGLIA = 35.0
+
 
 def _battery_size_kwh(consumo_centrale: float) -> float:
     for threshold, bat_kwh in _BATTERY_KWH_TIERS:
@@ -102,6 +109,88 @@ def _to_scenario_out(sr: ScenarioResult) -> ScenarioOut:
         detrazione_effettiva_eur=sr.detrazione_effettiva_eur,
         risparmio_annuo_anno1_eur=sr.risparmio_annuo_anno1_eur,
         produzione_anno1_kwh=sr.produzione_anno1_kwh,
+    )
+
+
+def _compute_beneficio_breakdown(sr: ScenarioResult) -> BeneficioBreakdown:
+    """Scompone il beneficio anno 1 in: risparmio bolletta / export / quota detrazione."""
+    saving = sr.economics.year1_saving_eur
+    export = sr.economics.year1_export_revenue_eur
+    quota_detr = sr.detrazione_totale_eur / 10.0
+    return BeneficioBreakdown(
+        risparmio_bolletta_eur=round(saving, 0),
+        ricavi_export_eur=round(export, 0),
+        quota_detrazione_eur=round(quota_detr, 0),
+        totale_anno1_eur=round(saving + export + quota_detr, 0),
+    )
+
+
+def _compute_verdetto(
+    pb: float,
+    npv: float,
+    autosufficienza_pct: float,
+    beneficio: BeneficioBreakdown,
+) -> VerdettoPV:
+    """Verdetto onesto che pesa economics e copertura energetica.
+
+    Autosufficienza < 35% degrada di un livello: il beneficio dipende
+    principalmente da detrazione e export, non dalla riduzione della bolletta.
+    """
+    pb = min(pb, 99.0)
+
+    # Financial grade: 0=negativo, 1=accettabile, 2=buono, 3=ottimo
+    if pb <= 8 and npv > 0:
+        fin_grade = 3
+    elif pb <= 12 and npv > 0:
+        fin_grade = 2
+    elif pb < 20 and npv > 0:
+        fin_grade = 1
+    else:
+        fin_grade = 0
+
+    bassa_as = autosufficienza_pct < _AUTOSUFFICIENZA_AVVERTENZA_SOGLIA
+    # Downgrade by one level if energy independence is low (only from buono/ottimo)
+    if bassa_as and fin_grade >= 2:
+        fin_grade -= 1
+
+    etichetta = ("negativo", "accettabile", "buono", "ottimo")[fin_grade]
+
+    if etichetta == "negativo":
+        testo = (
+            f"⚠ Investimento difficile da giustificare nelle assunzioni correnti: "
+            f"payback ~{pb:.1f} anni, NPV a 25 anni {npv:+,.0f} €. "
+            "Riconsiderare la taglia o aggiornare il consumo reale."
+        )
+    else:
+        grade_label = {
+            "ottimo": "Investimento eccellente",
+            "buono": "Investimento buono",
+            "accettabile": "Investimento accettabile",
+        }[etichetta]
+        parti = [
+            f"{grade_label}: payback ~{pb:.1f} anni, NPV a 25 anni +€{_fmt_it(npv)}.",
+            (
+                f"Beneficio anno 1: risparmio bolletta €{beneficio.risparmio_bolletta_eur:.0f}"
+                f" + export €{beneficio.ricavi_export_eur:.0f}"
+                f" + quota detrazione €{beneficio.quota_detrazione_eur:.0f}"
+                f" = €{beneficio.totale_anno1_eur:.0f}."
+            ),
+        ]
+        if bassa_as:
+            parti.append(
+                f"⚠ Autosufficienza stimata {autosufficienza_pct:.0f}%: l'impianto copre "
+                f"solo una quota ridotta del fabbisogno. Il beneficio dipende in larga "
+                f"misura dalla detrazione fiscale e dai ricavi di cessione — non da una "
+                f"effettiva riduzione dei prelievi dalla rete."
+            )
+        testo = " ".join(parti)
+
+    return VerdettoPV(
+        payback_anni=round(pb, 1),
+        npv_eur=round(npv, 0),
+        etichetta=etichetta,
+        autosufficienza_pct=round(autosufficienza_pct, 1),
+        testo=testo,
     )
 
 
@@ -168,7 +257,7 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         consumo_da_bolletta = False
         avvertenze_consumo = ce.avvertenze
 
-    # ── 4. PV size (fixed across the sweep) ──────────────────────────────────
+    # ── 4. PV size (fixed across demand runs) ────────────────────────────────
     # Residential roof: half of floor area, pitched, high-density layout
     roof_area = req.floor_area_m2 * 0.5
     kwp_max = kwp_from_area(roof_area, "roof_integrated", 100.0)
@@ -180,14 +269,13 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
     pv_capex = estimate_pv_cost_residential(kwp)
     pv_cost_per_kwp = pv_capex / kwp
 
-    # ── 5. PV production profile ─────────────────────────────────────────────
+    # ── 5. PV simulation for primary kWp ─────────────────────────────────────
     pv_sys = PVSystem(peak_power_kWp=kwp, tilt_deg=30, azimuth_deg=180)
     pv_result = simulate_pv(tmy, pv_sys, mounting="close_roof")
-    # P_ac_W [W] for 1-hour intervals = [Wh]
     pv_hourly_Wh = [h.P_ac_W for h in pv_result.hourly]
     produzione_annua_kwh = pv_result.production_annual_kWh
 
-    # ── 6. Demand profile shape (profile drives hourly distribution) ──────────
+    # ── 6. Demand profile shape ───────────────────────────────────────────────
     profile_type = (
         "residential_working_family"
         if req.presenza_diurna == "per_lo_piu_vuota"
@@ -217,7 +305,7 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         cooling_demand_monthly_kWh=[0.0] * 12,
     ))
     raw_Wh = raw_loads.hourly_demand_Wh
-    raw_total = sum(raw_Wh) or 1.0  # guard against degenerate zero profile
+    raw_total = sum(raw_Wh) or 1.0
 
     def _scale(target_kwh: float) -> list[float]:
         factor = target_kwh * 1000.0 / raw_total
@@ -226,23 +314,29 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
     # ── 7. Battery taglia (dynamic, scales with central consumption) ───────────
     battery_kwh = _battery_size_kwh(centrale)
 
-    # ── 8. Simulations ×3 (fixed kWp, three demand levels) ───────────────────
-    def _run(demand_Wh: list[float]) -> BatteryScenarioComparison:
+    # ── 8. Shared battery-comparison helper ───────────────────────────────────
+    def _run_battery(
+        pv_h: list[float],
+        demand_Wh: list[float],
+        kwp_val: float,
+        capex_val: float,
+    ) -> BatteryScenarioComparison:
         return compare_battery_scenarios(
-            pv_hourly_Wh=pv_hourly_Wh,
+            pv_hourly_Wh=pv_h,
             demand_hourly_Wh=demand_Wh,
-            pv_kwp=kwp,
-            pv_cost_eur_kwp=pv_cost_per_kwp,
+            pv_kwp=kwp_val,
+            pv_cost_eur_kwp=capex_val / kwp_val,
             abitazione_principale=req.abitazione_principale,
             irpef_annua_stimata=req.irpef_annua_stimata,
             battery_kwh=battery_kwh,
         )
 
-    cmp_centrale = _run(_scale(centrale))
-    cmp_basso = _run(_scale(basso))
-    cmp_alto = _run(_scale(alto))
+    # ── 9. Primary scenario (central demand) + range (low/high demand) ────────
+    cmp_centrale = _run_battery(pv_hourly_Wh, _scale(centrale), kwp, pv_capex)
+    cmp_basso    = _run_battery(pv_hourly_Wh, _scale(basso),    kwp, pv_capex)
+    cmp_alto     = _run_battery(pv_hourly_Wh, _scale(alto),     kwp, pv_capex)
 
-    # ── 9. Ranges (senza_batteria across the three demand levels) ─────────────
+    # ── 10. Ranges from low/central/high demand ───────────────────────────────
     all_sb = [
         cmp_basso.senza_batteria,
         cmp_centrale.senza_batteria,
@@ -257,41 +351,88 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         high=round(min(max(sc.payback_anni for sc in all_sb), 99.0), 1),
     )
 
-    # ── 10. Verdetto onesto (central, senza_batteria) ─────────────────────────
-    sb_central = cmp_centrale.senza_batteria
-    pb = min(sb_central.payback_anni, 99.0)
-    npv = sb_central.npv_eur
-    if pb <= 8 and npv > 0:
-        etichetta = "ottimo"
-        testo_verdetto = (
-            f"Investimento eccellente: payback ~{pb:.1f} anni, "
-            f"NPV a 25 anni +€{_fmt_it(npv)}."
-        )
-    elif pb <= 12 and npv > 0:
-        etichetta = "buono"
-        testo_verdetto = (
-            f"Investimento buono: payback ~{pb:.1f} anni, "
-            f"NPV a 25 anni +€{_fmt_it(npv)}."
-        )
-    elif pb < 20 and npv > 0:
-        etichetta = "accettabile"
-        testo_verdetto = (
-            f"Investimento accettabile: payback ~{pb:.1f} anni, "
-            f"NPV a 25 anni +€{_fmt_it(npv)}. Valutare alternative."
-        )
-    else:
-        etichetta = "negativo"
-        testo_verdetto = (
-            f"⚠ Investimento difficile da giustificare nelle assunzioni correnti: "
-            f"payback ~{pb:.1f} anni, NPV a 25 anni {npv:+,.0f} €. "
-            "Riconsiderare la taglia o aggiornare il consumo reale."
-        )
+    # ── 11. Taglie confronto (2-3 auto_scenarios kWp, central demand each) ────
+    kwp_min = taglie["minimal"]
+    kwp_rec = taglie["recommended"]
+    kwp_max_t = taglie["maximum"]
 
-    # ── 11. CO₂ evitata (central, self-consumed FV only) ─────────────────────
+    kwp_vals = sorted(set([kwp_min, kwp_rec, kwp_max_t]))
+    if len(kwp_vals) < 3:
+        # Add a midpoint between min and max to get 3 comparison points
+        mid_raw = (min(kwp_vals) + max(kwp_vals)) / 2.0
+        mid = round(mid_raw * 2) / 2  # round to nearest 0.5 kWp
+        mid = max(min(kwp_vals), min(max(kwp_vals), mid))
+        kwp_vals = sorted(set(kwp_vals + [mid]))
+
+    def _taglia_label(kwp_val: float) -> str:
+        if abs(kwp_val - kwp_rec) < 0.01:
+            return "consigliata"
+        elif abs(kwp_val - min(kwp_vals)) < 0.01:
+            return "minima"
+        elif abs(kwp_val - max(kwp_vals)) < 0.01:
+            return "massima"
+        return "media"
+
+    taglie_confronto: list[TagliaOut] = []
+    for kwp_val in kwp_vals:
+        # Reuse primary PV simulation if same kWp; otherwise simulate fresh
+        if abs(kwp_val - kwp) < 0.01:
+            pv_h_t = pv_hourly_Wh
+            prod_t = produzione_annua_kwh
+            capex_t = pv_capex
+            cmp_t = cmp_centrale
+        else:
+            pv_sys_t = PVSystem(peak_power_kWp=kwp_val, tilt_deg=30, azimuth_deg=180)
+            pv_res_t = simulate_pv(tmy, pv_sys_t, mounting="close_roof")
+            pv_h_t = [h.P_ac_W for h in pv_res_t.hourly]
+            prod_t = pv_res_t.production_annual_kWh
+            capex_t = estimate_pv_cost_residential(kwp_val)
+            cmp_t = _run_battery(pv_h_t, _scale(centrale), kwp_val, capex_t)
+
+        sb_t = cmp_t.senza_batteria
+        beneficio_t = _compute_beneficio_breakdown(sb_t)
+        verdetto_t = _compute_verdetto(
+            min(sb_t.payback_anni, 99.0), sb_t.npv_eur,
+            sb_t.autosufficienza_pct, beneficio_t,
+        )
+        taglie_confronto.append(TagliaOut(
+            label=_taglia_label(kwp_val),
+            kwp=round(kwp_val, 1),
+            capex_eur=float(capex_t),
+            produzione_annua_kwh=round(prod_t, 0),
+            autoconsumo_pct=sb_t.autoconsumo_pct,
+            autosufficienza_pct=sb_t.autosufficienza_pct,
+            risparmio_annuo_anno1_eur=sb_t.risparmio_annuo_anno1_eur,
+            payback_anni=min(sb_t.payback_anni, 99.0),
+            npv_eur=sb_t.npv_eur,
+            beneficio_breakdown=beneficio_t,
+            verdetto=verdetto_t,
+            senza_batteria=_to_scenario_out(sb_t),
+            con_batteria=_to_scenario_out(cmp_t.con_batteria),
+            tradeoff=TradeoffOut(
+                delta_autoconsumo_pp=cmp_t.tradeoff.delta_autoconsumo_pp,
+                delta_autosufficienza_pp=cmp_t.tradeoff.delta_autosufficienza_pp,
+                delta_payback_anni=cmp_t.tradeoff.delta_payback_anni,
+                delta_npv_eur=cmp_t.tradeoff.delta_npv_eur,
+                delta_capex_eur=cmp_t.tradeoff.delta_capex_eur,
+                batteria_conveniente=cmp_t.tradeoff.batteria_conveniente,
+                nota=cmp_t.tradeoff.nota,
+            ),
+        ))
+
+    # ── 12. Primary verdetto (primary kWp, central demand) ────────────────────
+    sb_central = cmp_centrale.senza_batteria
+    beneficio_centrale = _compute_beneficio_breakdown(sb_central)
+    verdetto_pv = _compute_verdetto(
+        min(sb_central.payback_anni, 99.0), sb_central.npv_eur,
+        sb_central.autosufficienza_pct, beneficio_centrale,
+    )
+
+    # ── 13. CO₂ evitata (central, self-consumed FV only) ─────────────────────
     self_consumed_kwh = produzione_annua_kwh * sb_central.autoconsumo_pct / 100.0
     co2_evitata = round(self_consumed_kwh * _CO2_KG_PER_KWH, 0)
 
-    # ── 12. Assumptions block ─────────────────────────────────────────────────
+    # ── 14. Assumptions block ─────────────────────────────────────────────────
     zona_label = f"Zona climatica {comune.zona_climatica} — fonte DPR 412/93 (tabella ENEA)"
     if comune.zona_fonte == "nearest_neighbor":
         zona_label += " — comune nato da fusione, zona ereditata dal comune limitrofo"
@@ -319,15 +460,20 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         f"Impianto: {kwp:.1f} kWp, tilt 30°, esposizione sud (close_roof), "
         + ("taglia consigliata calcolata sul consumo centrale"
            if auto_dimensionato else "potenza indicata dall'utente"),
-        f"CAPEX indicativo residenziale: €{_fmt_it(pv_capex)} "
-        f"(€{pv_cost_per_kwp:,.0f}/kWp, listino 2026)",
+        f"CAPEX indicativo residenziale: €{_fmt_it(pv_capex)} totali "
+        f"(€{pv_cost_per_kwp:,.0f}/kWp medio, include €1.500 costi fissi "
+        f"ponteggio/inverter/CILA)",
         f"Batteria confrontata: {battery_kwh:.0f} kWh nominali "
-        f"(€{_fmt_it(battery_kwh * 550)}/kWh installato, ENEA RAEE 2023)",
+        f"(totale €{_fmt_it(battery_kwh * 550)} — €550/kWh installato, ENEA RAEE 2023)",
         f"Detrazione IRPEF: {'50%' if req.abitazione_principale else '36%'} "
         f"{'(abitazione principale)' if req.abitazione_principale else '(altro immobile)'}, "
         f"10 quote annuali, tetto €96.000 — art. 16-bis TUIR (L. 207/2024)",
         "Prezzi energia: 0,25 €/kWh acquisto, 0,08 €/kWh cessione; "
         "orizzonte 25 anni, degrado FV 0,5 %/anno, escalation elettricità 2,5 %/anno",
+        "⚠ Detrazione 50% valida per spese 2026 (L. 207/2024): "
+        "scende al 36% dal 2027 salvo ulteriori proroghe.",
+        "⚠ Prezzo di cessione 0,08 €/kWh (scambio sul posto GSE 2026): "
+        "in caso di rinegoziazione o passaggio a ritiro dedicato il ricavo può variare.",
         "Stima preliminare automatica — i valori reali dipendono dall'abitazione "
         "specifica e richiedono l'analisi di Livello 2",
     ]
@@ -362,12 +508,8 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
             batteria_conveniente=cmp_centrale.tradeoff.batteria_conveniente,
             nota=cmp_centrale.tradeoff.nota,
         ),
-        verdetto_pv=VerdettoPV(
-            payback_anni=round(pb, 1),
-            npv_eur=round(npv, 0),
-            etichetta=etichetta,
-            testo=testo_verdetto,
-        ),
+        verdetto_pv=verdetto_pv,
+        taglie_confronto=taglie_confronto,
         capex_indicativo_eur=float(pv_capex),
         assunzioni=assunzioni,
     )

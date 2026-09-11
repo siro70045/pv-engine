@@ -253,6 +253,11 @@ class TestVerdetto:
         vp = body["verdetto_pv"]
         pb = vp["payback_anni"]
         eti = vp["etichetta"]
+        # With autosufficienza-aware logic:
+        # "ottimo" → pb ≤ 8 (AND autosufficienza ≥ 35%)
+        # "buono"  → pb ≤ 12 (possibly downgraded from ottimo if AS < 35%)
+        # "accettabile" → pb < 20 (possibly downgraded from buono if AS < 35%)
+        # "negativo" → pb ≥ 20 OR npv ≤ 0
         if eti == "ottimo":
             assert pb <= 8
         elif eti == "buono":
@@ -260,6 +265,12 @@ class TestVerdetto:
         elif eti == "accettabile":
             assert pb < 20
         # "negativo": pb >= 20 OR npv <= 0
+
+    def test_verdetto_ha_autosufficienza_pct(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        vp = body["verdetto_pv"]
+        assert "autosufficienza_pct" in vp
+        assert 0.0 <= vp["autosufficienza_pct"] <= 100.0
 
     def test_verdetto_negativo_testo_contiene_avvertenza(self, client):
         """Impianto very large rispetto al basso consumo → negativo."""
@@ -390,3 +401,142 @@ class TestVerdettoEtichette:
         pb_scenario = body["senza_batteria"]["payback_anni"]
         # Devono essere lo stesso valore (da central senza_batteria)
         assert pb_verdetto == pytest.approx(pb_scenario, abs=0.15)
+
+
+# ── 13. Taglie confronto ──────────────────────────────────────────────────────
+
+class TestTaglieConfronto:
+    def test_taglie_confronto_presenti(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        tc = body["taglie_confronto"]
+        assert isinstance(tc, list)
+        assert len(tc) >= 2
+
+    def test_taglie_confronto_struttura(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        for t in body["taglie_confronto"]:
+            assert "kwp" in t
+            assert "capex_eur" in t
+            assert "autosufficienza_pct" in t
+            assert "payback_anni" in t
+            assert "npv_eur" in t
+            assert "beneficio_breakdown" in t
+            assert "verdetto" in t
+            assert "senza_batteria" in t
+            assert "con_batteria" in t
+            assert "tradeoff" in t
+
+    def test_taglie_confronto_kwp_ordinati(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        kwps = [t["kwp"] for t in body["taglie_confronto"]]
+        assert kwps == sorted(kwps)
+
+    def test_taglie_confronto_capex_positivo(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        for t in body["taglie_confronto"]:
+            assert t["capex_eur"] > 0
+
+    def test_taglie_confronto_etichette_valide(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        for t in body["taglie_confronto"]:
+            assert t["verdetto"]["etichetta"] in {"ottimo", "buono", "accettabile", "negativo"}
+
+    def test_taglie_confronto_label_valide(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        valid = {"minima", "media", "consigliata", "massima"}
+        for t in body["taglie_confronto"]:
+            assert t["label"] in valid
+
+    def test_taglie_confronto_verdetto_ha_autosufficienza(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        for t in body["taglie_confronto"]:
+            assert "autosufficienza_pct" in t["verdetto"]
+            assert 0.0 <= t["verdetto"]["autosufficienza_pct"] <= 100.0
+
+
+# ── 14. Beneficio breakdown ──────────────────────────────────────────────────
+
+class TestBeneficioBreakdown:
+    def test_breakdown_campi_presenti(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        for t in body["taglie_confronto"]:
+            bd = t["beneficio_breakdown"]
+            assert "risparmio_bolletta_eur" in bd
+            assert "ricavi_export_eur" in bd
+            assert "quota_detrazione_eur" in bd
+            assert "totale_anno1_eur" in bd
+
+    def test_breakdown_non_negativi(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        for t in body["taglie_confronto"]:
+            bd = t["beneficio_breakdown"]
+            assert bd["risparmio_bolletta_eur"] >= 0
+            assert bd["ricavi_export_eur"] >= 0
+            assert bd["quota_detrazione_eur"] >= 0
+            assert bd["totale_anno1_eur"] > 0
+
+    def test_breakdown_totale_coerente(self, client):
+        """totale ≈ somma delle tre voci (arrotondamenti in gioco)."""
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        for t in body["taglie_confronto"]:
+            bd = t["beneficio_breakdown"]
+            expected = bd["risparmio_bolletta_eur"] + bd["ricavi_export_eur"] + bd["quota_detrazione_eur"]
+            assert abs(bd["totale_anno1_eur"] - expected) <= 3.0
+
+
+# ── 15. Costi fissi residenziali ─────────────────────────────────────────────
+
+class TestCostiFissi:
+    def test_capex_min_1500_rispetto_a_prima(self, client):
+        """1,5 kWp deve costare almeno €5.000 (vecchio €4.000 + €1.500 fissi)."""
+        body = client.post("/estimate/casa", json={
+            **_BASE_BOLLETTA,
+            "potenza_kwp": 1.5,
+            "floor_area_m2": 200.0,   # roof large enough for 1.5 kWp
+        }).json()
+        assert body["capex_indicativo_eur"] >= 5_000
+
+    def test_assunzioni_contiene_costi_fissi(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        testo = " ".join(body["assunzioni"]).lower()
+        assert "1.500" in testo or "fissi" in testo
+
+
+# ── 16. Avvertenze fragilità ─────────────────────────────────────────────────
+
+class TestAvvertenzeFragilita:
+    def test_avvertenza_detrazione_2027(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        testo = " ".join(body["assunzioni"])
+        assert "2027" in testo
+
+    def test_avvertenza_prezzo_export(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        testo = " ".join(body["assunzioni"])
+        assert "0,08" in testo or "cessione" in testo.lower()
+
+
+# ── 17. Borzano: autosufficienza bassa annotata nel verdetto ─────────────────
+
+class TestBorzanoAutosufficienza:
+    def test_borzano_autosufficienza_pct_presente(self, client):
+        body = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
+        assert "autosufficienza_pct" in body["verdetto_pv"]
+
+    def test_borzano_verdetto_non_ottimo_con_basso_consumo(self, client):
+        """Con 1.435 kWh/anno e TMY sintetico (alta produzione),
+        l'autosufficienza è bassa: il verdetto non può essere 'ottimo'."""
+        body = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
+        eti = body["verdetto_pv"]["etichetta"]
+        # Con il nuovo modello di costi e la regola autosufficienza,
+        # "ottimo" richiede payback ≤ 8 AND autosufficienza ≥ 35%.
+        # Per Borzano 1.435 kWh, autosufficienza è ~20-35% con TMY sintetico.
+        # Non assertiamo il valore esatto, ma "ottimo" è strutturalmente improbabile.
+        assert eti in {"buono", "accettabile", "negativo"}
+
+    def test_borzano_testo_contiene_avvertenza_se_as_bassa(self, client):
+        body = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
+        vp = body["verdetto_pv"]
+        as_pct = vp["autosufficienza_pct"]
+        if as_pct < 35.0 and vp["etichetta"] != "negativo":
+            assert "⚠" in vp["testo"] or "autosufficienza" in vp["testo"].lower()

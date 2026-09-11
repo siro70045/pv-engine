@@ -100,12 +100,39 @@ class TradeoffOut(BaseModel):
     nota: str
 
 
+class BeneficioBreakdown(BaseModel):
+    """Scomposizione del beneficio economico anno 1 (scenario senza batteria)."""
+    risparmio_bolletta_eur: float   # energia autoconsumata × prezzo acquisto
+    ricavi_export_eur: float        # energia ceduta × prezzo cessione GSE
+    quota_detrazione_eur: float     # singola rata IRPEF annua (detrazione_totale / 10)
+    totale_anno1_eur: float         # somma delle tre voci
+
+
 class VerdettoPV(BaseModel):
     """Verdetto onesto sul solo FV (senza batteria, domanda centrale)."""
     payback_anni: float
     npv_eur: float
     etichetta: Literal["ottimo", "buono", "accettabile", "negativo"]
+    autosufficienza_pct: float      # % del fabbisogno coperto dall'autoproduzione
     testo: str
+
+
+class TagliaOut(BaseModel):
+    """Confronto per una singola taglia d'impianto (domanda centrale)."""
+    label: str                      # "minima" | "media" | "consigliata" | "massima"
+    kwp: float
+    capex_eur: float
+    produzione_annua_kwh: float
+    autoconsumo_pct: float
+    autosufficienza_pct: float
+    risparmio_annuo_anno1_eur: float
+    payback_anni: float
+    npv_eur: float
+    beneficio_breakdown: BeneficioBreakdown
+    verdetto: VerdettoPV
+    senza_batteria: ScenarioOut
+    con_batteria: ScenarioOut
+    tradeoff: TradeoffOut
 
 
 class EstimateCasaResponse(BaseModel):
@@ -131,13 +158,16 @@ class EstimateCasaResponse(BaseModel):
     payback_anni: RangeLowHigh
     co2_evitata_kg_anno: float         # centrale (self-consumed × CO₂ factor)
 
-    # ── Battery comparison (central demand) ───────────────────────────────────
+    # ── Battery comparison (central demand, primary kWp) ─────────────────────
     senza_batteria: ScenarioOut
     con_batteria: ScenarioOut
     tradeoff: TradeoffOut
 
-    # ── Verdetto onesto ────────────────────────────────────────────────────────
+    # ── Verdetto onesto (primary kWp, central demand) ─────────────────────────
     verdetto_pv: VerdettoPV
+
+    # ── Ventaglio taglie confrontabili ────────────────────────────────────────
+    taglie_confronto: list[TagliaOut]
 
     # ── CAPEX ─────────────────────────────────────────────────────────────────
     capex_indicativo_eur: float

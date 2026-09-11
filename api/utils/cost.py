@@ -8,6 +8,12 @@ importing those Streamlit modules.
 from __future__ import annotations
 
 
+# Costi fissi residenziali [€] — ponteggio, inverter, CILA/pratiche, collaudo GSE.
+# Non proporzionali alla taglia: presenti anche per un impianto da 1,5 kWp.
+# Fonte: listini installatori 2026 (media Italia centro-nord), voce "fissi" €1.200-1.800.
+FIXED_RESIDENTIAL_EUR: float = 1_500.0
+
+
 def estimate_pv_cost_residential(kwp: float) -> int:
     """All-in residential PV installation cost [€]."""
     tiers = [
@@ -26,6 +32,7 @@ def estimate_pv_cost_residential(kwp: float) -> int:
         remaining -= in_tier
         prev = thresh
     cost += max(800.0, kwp * 18.0)   # design + permits + grid connection
+    cost += FIXED_RESIDENTIAL_EUR    # costi fissi: ponteggio, inverter, CILA, collaudo
     return int(round(cost, -2))
 
 

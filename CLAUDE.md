@@ -11,12 +11,13 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2, `shapely>=2.0` (poligoni regionali 
 - `engine/` — `solar.py` (`BuildingFootprint`, `simulate_pv`, `simulate_pv_multi`), `pvgis_client.py`, `economics.py`, `energy_vectors.py`, `energy_balance.py`, `envelope.py`, `heat_pump.py`, `loads.py`, `scenarios.py`
 - `school/` — `calendar_it.py` (calendari regionali 21 regioni), `climate_zones.py` (zone A-F), `incentives_school.py`, `loads_school.py` (include day-of-week modulation), `comuni.py` (lookup 7.896 comuni con centroide + zona climatica ufficiale), `estimate_defaults.py` (default-filling per `/estimate` Livello 1)
 - `school/data/` — `regioni_istat.geojson` (poligoni regionali), `comuni_italiani.csv` (7.896 comuni ISTAT 2025 con centroidi + zona DPR 412/93; fonti e licenze in `school/data/README.md`; rigenerabile con `build_comuni_dataset.py`)
-- `api/` — `main.py` FastAPI (26 endpoint), `routers/` split per dominio (building, economics, estimate, loads, location, pv, simulate), `schemas/` Pydantic per dominio, `utils/`
+- `residential/` — `estimate_defaults.py` (proxy consumo da n_persone/m²/riscaldamento/ACS/EV/condizionatore), `incentives.py` (detrazione IRPEF 50%/36%, capienza opzionale), `battery_scenario.py` (scenari con/senza batteria, trade-off esplicito, taglia dinamica 3/5/7 kWh)
+- `api/` — `main.py` FastAPI (27+ endpoint), `routers/` split per dominio (building, economics, estimate, estimate_casa, loads, location, pv, simulate), `schemas/` Pydantic per dominio, `utils/`
 - `branding/` — `meridiana_theme.py` per restyling Streamlit
 - `app.py`, `app_school.py` — Streamlit dev tools (NON produzione)
 - `.streamlit/config.toml` — theme Streamlit base Meridiana
 - `schemas.py` (root) — schemi Pydantic condivisi legacy
-- `tests/` — 195 test pytest verdi (loads/dow, multi-footprint, scenarios, envelope, TOU, region, comuni, estimate defaults, estimate API, residential profile calibration)
+- `tests/` — 370 test pytest verdi (loads/dow, multi-footprint, scenarios, envelope, TOU, region, comuni, estimate defaults, estimate API, residential profile calibration, estimate_casa API)
 
 ## Decisioni architetturali
 
@@ -25,16 +26,16 @@ Python 3.11+, `pvlib`, FastAPI, Pydantic v2, `shapely>=2.0` (poligoni regionali 
 - **Test prima del refactor**.
 - **Multi-edificio modulare** (Fase A V1.1 completata 3 mag 2026, commit `3f5ce7e`).
 
-## Stato attuale (31 ago 2026)
+## Stato attuale (13 set 2026)
 
-- Motore validato, 195 test verdi
-- API FastAPI deployata su Railway (26 endpoint)
+- Motore validato, 370 test verdi
+- API FastAPI deployata su Railway (27+ endpoint)
 - Production hardening: JSON logs, rate limiting, two-level TMY cache (`2704305`)
 - Multi-footprint support nel motore (`3f5ce7e`)
 - Restyling Streamlit Meridiana applicato (`1061604`)
-- `/estimate` Fase A completata (fondamenta libreria, 10 giu 2026): dataset comuni + `school/comuni.py` + `school/estimate_defaults.py`
-- `/estimate` Fase B completata (endpoint API, 11 giu 2026): `POST /estimate` pubblico, rate limit 5/min
-- Pivot residenziale FASE 0 completata (31 ago 2026, commit `14d0842`): profilo `residential_working_family` in `engine/loads.py`, calibrato su bolletta reale ARERA
+- `/estimate` scuole Fase A+B completate (giu 2026): dataset comuni, endpoint pubblico, rate limit 5/min
+- Pivot residenziale FASE 0 completata (31 ago 2026, commit `14d0842`): profilo `residential_working_family` calibrato su firma ARERA reale
+- Pivot residenziale FASE 1 completata (set 2026): package `residential/`, `POST /estimate/casa` con ventaglio taglie, batteria, verdetto onesto, orientamento tetto, soglia "marginale"
 
 ## Endpoint /estimate (stima preliminare Livello 1 sito Meridiana)
 
@@ -65,23 +66,43 @@ Stima pubblica con 5 input form: Comune, tipologia scuola (4 voci: elementare/me
 
 ## Pivot residenziale (B2C case)
 
-**Contesto strategico (ago 2026)**: dopo l'incontro col Comune di Albinea, il focus si sposta dalle scuole/PA ai privati cittadini. Modello di business: stima gratuita (numero + margine di incertezza), PDF approfondimento a pagamento, donazione facoltativa. Il motore è già adatto (PV + HP + economics): mancano i default residenziali e il layer di incentivi domestici.
+**Contesto strategico (ago 2026)**: dopo l'incontro col Comune di Albinea, il focus si sposta dalle scuole/PA ai privati cittadini. Modello di business: **stima gratuita** (numero + margine di incertezza), PDF approfondimento a pagamento, donazione facoltativa. Niente commissioni installatori, niente vendita lead. Il motore è già adatto (PV + HP + economics).
 
 **FASE 0 ✅ COMPLETATA (31 ago 2026, commit `14d0842`)** — Profilo di carico "working_family":
-- Aggiunto `"residential_working_family"` a `engine/loads.py` (`_OCC_PROFILES` + `_LIGHT_PROFILES` + `BENCH`). Famiglia con adulti al lavoro e figli a scuola: occupazione diurna bassa (0.32-0.45 in F1), base notturna alta (0.50-0.55 per always-on: fridge/modem/standby), picco serale h17-22 portato principalmente dal profilo luci (identico a `"residential"`).
-- Calibrato su bolletta reale (Borzano, 4 persone, gas ACS/riscaldamento/cucina, 1.435 kWh/anno): target ARERA F1/F2/F3 = 28/33/39 %; ottenuto **F1=26.9 % / F2=36.1 % / F3=37.0 %** — entro ±4 pp su tutte le fasce (delibera ARERA 268/2015/R/EEL).
+- Aggiunto `"residential_working_family"` a `engine/loads.py` (`_OCC_PROFILES` + `_LIGHT_PROFILES` + `BENCH`). Famiglia con adulti al lavoro e figli a scuola: occupazione diurna bassa (0.32-0.45 in F1), base notturna alta (0.50-0.55 per always-on: fridge/modem/standby), picco serale h17-22 portato principalmente dal profilo luci.
+- Calibrato su bolletta reale (Borzano, 4 persone, gas ACS/riscaldamento/cucina, 1.435 kWh/anno): target ARERA F1/F2/F3 = 28/33/39 %; ottenuto **F1=26.9 % / F2=36.1 % / F3=37.0 %** — entro ±4 pp (delibera ARERA 268/2015/R/EEL).
 - Profilo `"residential"` storico **INVARIATO** (pensionati / single / chiunque a casa tutto il giorno).
-- 9 nuovi test (`tests/test_residential_working_family_profile.py`); 195/195 verdi; numeri canonici Borzano bit-perfect.
+- 9 nuovi test (`tests/test_residential_working_family_profile.py`); numeri canonici Borzano bit-perfect.
 
-⚠ **Nota di calibrazione**: profilo tarato su un solo caso a basso consumo (1.435 kWh/anno). Famiglie a consumo medio-alto (2.500-4.000 kWh/anno, lavatrice/lavastoviglie diurne) possono avere una firma F1 diversa. Da rivalidare con 2-3 bollette reali a consumo più alto prima di considerarlo rappresentativo del parco residenziale generale.
+⚠ **Nota di calibrazione (da non perdere)**: profilo tarato su un solo caso a basso consumo (1.435 kWh/anno, gas puro). Da rivalidare con 2-3 bollette reali a consumo più alto (caso tutto-elettrico, caso con EV) prima di considerarlo rappresentativo del parco residenziale generale.
 
-**FASE 1 (da fare)** — Backend residenziale:
-- Nuovo package `residential/` con:
-  - `estimate_defaults.py`: proxy consumo da n_persone / m² / tipologia riscaldamento / presenza EV
-  - `incentives.py`: detrazione IRPEF 50 % + Reddito Energetico (fasce ISEE basse)
-- Endpoint `POST /estimate/casa` (clona il pattern `api/routers/estimate.py`); input = bolletta annua reale **oppure** proxy da form (opzione C)
-- Scenario con/senza batteria affiancato al solo PV
-- **Decisione aperta**: come l'utente sceglie il profilo di presenza diurna — dropdown esplicito `"sempre_in_casa" / "lavoro_fuori"` vs. inference da n_persone e tipologia abitazione. Il profilo guida l'autoconsumo stimato e impatta il payback: non è un dettaglio estetico.
+**FASE 1 ✅ COMPLETATA (set 2026)** — Package `residential/` + endpoint `POST /estimate/casa`:
+
+*Moduli `residential/`:*
+- `estimate_defaults.py`: proxy consumo da n_persone / m² / riscaldamento elettrico / ACS / EV / condizionatore. Fonti: ARERA, ISTAT, UNI TS 11300, ENEA. ⚠ Il contributo condizionatore è una fonte non primaria — da rivalidare.
+- `incentives.py`: detrazione IRPEF 50% (abitazione principale) / 36% (altri immobili), tetto €96.000, recupero in 10 quote annuali, capienza IRPEF opzionale. Incentivi-impresa (ammortamento accelerato, Transizione 5.0) esclusi dal perimetro residenziale. ⚠ **50% valido per spese 2026 (L. 207/2024): scende a 36% dal 2027 salvo proroghe** — dichiarato esplicitamente nel blocco assunzioni di ogni risposta.
+- `battery_scenario.py`: scenari con/senza batteria sempre affiancati (trade-off esplicito, mai omesso). Taglia dinamica 3/5/7 kWh in base al consumo annuo. Costo 550 €/kWh installato (ENEA RAEE 2023).
+
+*Endpoint `POST /estimate/casa` (`api/routers/estimate_casa.py`):*
+- Input: comune + provincia (per omonimi), n_occupants, floor_area_m2, bolletta_kwh (preferita) o proxy, presenza_diurna, orientamento, potenza_kwp opzionale, abitazione_principale, irpef_annua_stimata opzionale.
+- Output: consumo centrale + banda, kwp_ipotizzato, produzione, ventaglio taglie_confronto, scenari batteria, verdetto_pv, assunzioni.
+- Rate limit: 5/min per IP (condiviso con `/estimate` scuole).
+
+**DECISIONI DI MODELLO DA NON PERDERE** (`api/routers/estimate_casa.py`):
+
+- **Costo fisso residenziale €1.500** (ponteggio, inverter, CILA, collaudo) incluso nel CAPEX e NON proporzionale alla taglia. Senza questo, gli impianti piccoli (1.5-2 kWp) risultavano falsamente convenienti perché il modello di costo lineare sottostimava i costi fissi.
+
+- **Cap dimensionamento 150%**: la taglia consigliata non può produrre più del 150% del fabbisogno annuo stimato — oltre quella soglia l'impianto vende principalmente alla rete a 0,08 €/kWh (assunzione fragile). Tra le candidate nel cap si sceglie la taglia con NPV migliore. Se tutte le candidate superano il cap (casa piccola), si usa la taglia minima disponibile e si dichiara esplicitamente. Il criterio NPV/capex come alternativa al cap è stato valutato e scartato: non protegge dal sovradimensionamento, ottimizza solo il rendimento percentuale. `auto_scenarios` NON modificato: la logica vive nel wrapper casa (`estimate_casa.py`), il flusso scuole rimane intatto.
+
+- **Ventaglio taglie_confronto**: sempre esposto per tutte le taglie, anche quelle fuori cap, con spiegazione del perché non sono raccomandate. L'utente può confrontare autonomamente.
+
+- **Verdetto declassato se autosufficienza < 35%**: un impianto che copre poco il fabbisogno dipende in larga misura dalla detrazione e dall'export — il verdetto lo segnala con ⚠.
+
+- **Etichetta "marginale"**: NPV/capex < 10% in 25 anni (≈ 0,4% nominale annuo, sotto l'inflazione). Inserita tra "accettabile" e "negativo". Esempio: nord 4.500 kWh → NPV €101 / capex €8.600 = 1,2% → "marginale" con testo esplicito sulla fragilità. La soglia si scala con il capex (10% di €8.600 = €860 per 3 kWp).
+
+- **Orientamento tetto**: 5 valori Literal — `sud` (180°), `sud_est_sud_ovest` (200°), `est_o_ovest` (270°, una sola falda), `nord` (0°), `non_so` (225° SW, ipotesi prudente). Tilt 30° assunto e dichiarato nelle assunzioni. `est_o_ovest` modella UNA sola falda esposta a est O a ovest (non due falde); un impianto su due falde richiede il Livello 2. Con TMY reale: S=4046, SSW=4025, SW=3858, W=3274, N=2280 kWh per 3 kWp a Albinea 4.500 kWh/anno.
+
+**DA FARE — Fase 2**: frontend `/casa/stima`. Prima del lancio, validare il proxy consumo con 2-3 casi reali diversi (una casa tutto-elettrico, una con EV) — finora validato solo su un caso a gas puro a basso consumo.
 
 ## Problemi noti
 
@@ -153,6 +174,11 @@ Gravità: bassissima.
 - `1b2b302` (17 mag 2026) fix(envelope): Simpson hourly cos_theta + Erbs diffuse fraction (Phase 2B — Voce #11 ✅ chiusa, Categoria 4 ✅ chiusa)
 - `2a885b9` (17 mag 2026) docs(methodology): document envelope solar model + voice #11 close
 - `14d0842` (31 ago 2026) feat(engine): add residential_working_family load profile (serale, calibrato su firma ARERA reale)
+- `9f93638` (set 2026) feat(residential): add battery scenario (with/without, honest trade-off, detraibile)
+- `b15c5c6` (set 2026) feat(api): add POST /estimate/casa residential estimate endpoint (proxy/bolletta, battery scenarios, honest verdict)
+- `d7db152` (set 2026) feat(api): ventaglio taglie, costi fissi €1.500, verdetto autosufficienza, bug label batteria
+- `3f47283` (set 2026) feat(api): auto-sizing cap 150% + NPV-best + sovradimensionamento warning
+- `436095f` (13 set 2026) feat(api): orientamento tetto, est_o_ovest, soglia marginale NPV/capex<10%
 
 ## Come usare questo file
 

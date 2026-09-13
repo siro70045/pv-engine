@@ -54,6 +54,18 @@ class EstimateCasaRequest(BaseModel):
     )
 
     # ── PV ────────────────────────────────────────────────────────────────────
+    orientamento: Literal["sud", "sud_est_sud_ovest", "est_o_ovest", "nord", "non_so"] = Field(
+        default="non_so",
+        description=(
+            "Orientamento della falda dove installare i pannelli (una sola falda). "
+            "'sud'=ottimale (azimuth 180°); "
+            "'sud_est_sud_ovest'=leggermente deviato, ~20° dal sud (azimuth 200°); "
+            "'est_o_ovest'=falda esposta a est OPPURE a ovest — si modella come ovest puro "
+            "(azimuth 270°), produzione ~80% rispetto a sud pieno; "
+            "'nord'=falda esposta a nord, sfavorevole (azimuth 0°); "
+            "'non_so'=orientamento ignoto — si assume sud-ovest (azimuth 225°) come ipotesi prudente."
+        ),
+    )
     potenza_kwp: Optional[float] = Field(
         default=None, ge=1, le=100,
         description="Potenza ipotizzata [kWp]; se assente viene auto-dimensionata.",
@@ -112,7 +124,7 @@ class VerdettoPV(BaseModel):
     """Verdetto onesto sul solo FV (senza batteria, domanda centrale)."""
     payback_anni: float
     npv_eur: float
-    etichetta: Literal["ottimo", "buono", "accettabile", "negativo"]
+    etichetta: Literal["ottimo", "buono", "accettabile", "marginale", "negativo"]
     autosufficienza_pct: float      # % del fabbisogno coperto dall'autoproduzione
     testo: str
 

@@ -106,6 +106,31 @@ _MAX_PRODUZIONE_SU_CONSUMO = 1.50
 # produces more than this multiple of consumption, warn in the verdetto text.
 _AVVISO_SOVRADIMENSIONAMENTO_RATIO = 1.50
 
+# Azimuth mapping for user-selected roof orientation.
+# Conventions: 0°=N, 90°=E, 180°=S, 270°=W.
+# est_o_ovest uses 270° (west face) as proxy; east gives same annual total.
+# non_so uses 225° (SW) as a prudent middle-ground for unknown orientation.
+_ORIENTAMENTO_AZIMUTH: dict[str, float] = {
+    "sud":               180.0,
+    "sud_est_sud_ovest": 200.0,
+    "est_o_ovest":       270.0,   # una sola falda: est O ovest, proxy ovest puro
+    "nord":              0.0,
+    "non_so":            225.0,
+}
+
+# Human-readable label for each orientation (used in assunzioni).
+_ORIENTAMENTO_DESC: dict[str, str] = {
+    "sud":              "SUD (azimuth 180°, esposizione ottimale)",
+    "sud_est_sud_ovest": "SUD-SUD-OVEST (azimuth 200°, ~20° dal sud — produzione ~97% rispetto a sud pieno)",
+    "est_o_ovest":      "EST O OVEST — una sola falda (azimuth 270°, modellata come ovest puro — "
+                        "produzione ~80% rispetto a sud pieno; vale sia per falda est che ovest in "
+                        "termini di produzione annua; un impianto su DUE falde richiede l'analisi di Livello 2)",
+    "nord":             "NORD (azimuth 0°, esposizione sfavorevole — produzione ~55-60% rispetto a sud pieno)",
+    "non_so":           "SUD-OVEST (azimuth 225°, ipotesi prudente per orientamento non noto — "
+                        "produzione ~90-95% rispetto a sud pieno; l'orientamento reale può "
+                        "spostare la stima del ±10-20%)",
+}
+
 
 @dataclass
 class _TagliaData:
@@ -164,7 +189,15 @@ def _compute_verdetto(
     autosufficienza_pct: float,
     beneficio: BeneficioBreakdown,
     prod_ratio: float = 0.0,
+    capex_eur: float = 0.0,
 ) -> VerdettoPV:
+    """Compute the honest verdict for a PV scenario.
+
+    capex_eur is used to detect fragile-positive investments: NPV/capex < 10%
+    (= barely above break-even over 25 years, ~0.4% nominal annual return)
+    triggers the "marginale" label instead of "accettabile".
+    With capex_eur=0 (default) the marginale threshold is never triggered.
+    """
     pb = min(pb, 99.0)
 
     if pb <= 8 and npv > 0:
@@ -181,6 +214,13 @@ def _compute_verdetto(
         fin_grade -= 1
 
     etichetta = ("negativo", "accettabile", "buono", "ottimo")[fin_grade]
+
+    # Marginale override: NPV > 0 but below 10% of capex over 25 years.
+    # 10% of capex in 25 years ≈ 0.4% nominal annual return — below inflation.
+    # Example: 3 kWp @ €4.200 capex → threshold €420; nord case (€101) → marginale.
+    if fin_grade >= 1 and npv > 0 and capex_eur > 0 and npv < capex_eur * 0.10:
+        etichetta = "marginale"
+
     sovradimensionato = prod_ratio > _AVVISO_SOVRADIMENSIONAMENTO_RATIO
 
     if etichetta == "negativo":
@@ -194,6 +234,20 @@ def _compute_verdetto(
                 f" (nota: l'impianto produce circa {prod_ratio:.1f}× il consumo stimato — "
                 "molta dell'energia va in vendita alla rete)"
             )
+    elif etichetta == "marginale":
+        parti = [
+            f"⚠ Investimento fragile: payback ~{pb:.1f} anni, NPV a 25 anni appena positivo "
+            f"+€{_fmt_it(npv)} (meno del 10% del capitale investito di €{_fmt_it(capex_eur)}).",
+            "Una variazione del prezzo di cessione (0,08 €/kWh), dell'aliquota IRPEF o "
+            "dell'escalation elettrica può facilmente portare l'NPV sotto zero.",
+            "Prima di procedere è consigliata l'analisi di Livello 2 con i dati reali dell'abitazione.",
+        ]
+        if bassa_as:
+            parti.append(
+                f"⚠ Autosufficienza stimata {autosufficienza_pct:.0f}%: il beneficio dipende "
+                "in larga misura dalla detrazione fiscale e dai ricavi di cessione."
+            )
+        testo = " ".join(parti)
     else:
         grade_label = {
             "ottimo": "Investimento eccellente",
@@ -302,6 +356,7 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
     taglie = auto_scenarios(centrale, kwp_max)
 
     auto_dimensionato = req.potenza_kwp is None
+    azimuth = _ORIENTAMENTO_AZIMUTH[req.orientamento]
 
     # ── 5. Demand profile shape ───────────────────────────────────────────────
     profile_type = (
@@ -378,7 +433,7 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
     # before we commit to the primary kWp in section 10.
     taglia_data: dict[float, _TagliaData] = {}
     for kv in kwp_vals:
-        pv_sys_t = PVSystem(peak_power_kWp=kv, tilt_deg=30, azimuth_deg=180)
+        pv_sys_t = PVSystem(peak_power_kWp=kv, tilt_deg=30, azimuth_deg=azimuth)
         pv_res_t = simulate_pv(tmy, pv_sys_t, mounting="close_roof")
         capex_t = estimate_pv_cost_residential(kv)
         pv_h_t = [h.P_ac_W for h in pv_res_t.hourly]
@@ -423,7 +478,7 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         kwp = float(req.potenza_kwp)
         # If user's kWp is not in the pre-computed set, add it now.
         if not any(abs(kwp - k) < 0.01 for k in kwp_vals):
-            pv_sys_u = PVSystem(peak_power_kWp=kwp, tilt_deg=30, azimuth_deg=180)
+            pv_sys_u = PVSystem(peak_power_kWp=kwp, tilt_deg=30, azimuth_deg=azimuth)
             pv_res_u = simulate_pv(tmy, pv_sys_u, mounting="close_roof")
             capex_u = estimate_pv_cost_residential(kwp)
             pv_h_u = [h.P_ac_W for h in pv_res_u.hourly]
@@ -481,6 +536,7 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
             min(sb_t.payback_anni, 99.0), sb_t.npv_eur,
             sb_t.autosufficienza_pct, beneficio_t,
             prod_ratio=_prod_ratio(kv),
+            capex_eur=float(td.capex),
         )
         taglie_confronto.append(TagliaOut(
             label=_taglia_label(kv),
@@ -515,6 +571,7 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         min(sb_central.payback_anni, 99.0), sb_central.npv_eur,
         sb_central.autosufficienza_pct, beneficio_centrale,
         prod_ratio=prod_ratio_primary,
+        capex_eur=float(pv_capex),
     )
 
     # If auto-sized AND every cap-eligible candidate has NPV ≤ 0: explicit message
@@ -598,7 +655,8 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         f"Superficie: {_fmt_it(req.floor_area_m2)} m² → area tetto stimata "
         f"{_fmt_it(roof_area)} m² (metà della superficie lorda, falda inclinata)",
         zona_label,
-        f"Impianto: {kwp:.1f} kWp, tilt 30°, esposizione sud (close_roof), {sizing_note}",
+        f"Impianto: {kwp:.1f} kWp, tilt 30° (assunto, falda tipica italiana), close_roof, {sizing_note}",
+        f"Orientamento falda: {_ORIENTAMENTO_DESC[req.orientamento]}",
         f"CAPEX indicativo residenziale: €{_fmt_it(pv_capex)} totali "
         f"(€{pv_cost_per_kwp:,.0f}/kWp medio, include €1.500 costi fissi "
         f"ponteggio/inverter/CILA)",
@@ -617,6 +675,12 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         "specifica e richiedono l'analisi di Livello 2",
     ]
     assunzioni.extend(avvertenze_consumo)
+    if req.orientamento == "non_so":
+        assunzioni.append(
+            "⚠ Orientamento tetto non specificato: la stima usa sud-ovest (azimuth 225°) "
+            "come ipotesi prudente. Una falda esposta a est o a ovest può produrre ~15-20% in meno; "
+            "una esposta a nord può produrre ~40-45% in meno rispetto a un tetto a sud."
+        )
 
     return EstimateCasaResponse(
         comune_risolto=ComuneRisolto(

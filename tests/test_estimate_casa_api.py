@@ -242,7 +242,7 @@ class TestVerdetto:
     def test_verdetto_ha_etichetta(self, client):
         body = client.post("/estimate/casa", json=_BASE_PROXY).json()
         vp = body["verdetto_pv"]
-        assert vp["etichetta"] in {"ottimo", "buono", "accettabile", "negativo"}
+        assert vp["etichetta"] in {"ottimo", "buono", "accettabile", "marginale", "negativo"}
 
     def test_verdetto_testo_non_vuoto(self, client):
         body = client.post("/estimate/casa", json=_BASE_PROXY).json()
@@ -262,7 +262,8 @@ class TestVerdetto:
             assert pb <= 8
         elif eti == "buono":
             assert pb <= 12
-        elif eti == "accettabile":
+        elif eti in {"accettabile", "marginale"}:
+            # "marginale" = accettabile per payback ma NPV/capex < 10% (fragile)
             assert pb < 20
         # "negativo": pb >= 20 OR npv <= 0
 
@@ -392,7 +393,7 @@ class TestVerdettoEtichette:
     def test_etichette_valide(self, client):
         body = client.post("/estimate/casa", json=_BASE_PROXY).json()
         assert body["verdetto_pv"]["etichetta"] in {
-            "ottimo", "buono", "accettabile", "negativo"
+            "ottimo", "buono", "accettabile", "marginale", "negativo"
         }
 
     def test_payback_senza_batteria_coerente_col_verdetto(self, client):
@@ -439,7 +440,7 @@ class TestTaglieConfronto:
     def test_taglie_confronto_etichette_valide(self, client):
         body = client.post("/estimate/casa", json=_BASE_PROXY).json()
         for t in body["taglie_confronto"]:
-            assert t["verdetto"]["etichetta"] in {"ottimo", "buono", "accettabile", "negativo"}
+            assert t["verdetto"]["etichetta"] in {"ottimo", "buono", "accettabile", "marginale", "negativo"}
 
     def test_taglie_confronto_label_valide(self, client):
         body = client.post("/estimate/casa", json=_BASE_PROXY).json()
@@ -532,7 +533,7 @@ class TestBorzanoAutosufficienza:
         # "ottimo" richiede payback ≤ 8 AND autosufficienza ≥ 35%.
         # Per Borzano 1.435 kWh, autosufficienza è ~20-35% con TMY sintetico.
         # Non assertiamo il valore esatto, ma "ottimo" è strutturalmente improbabile.
-        assert eti in {"buono", "accettabile", "negativo"}
+        assert eti in {"buono", "accettabile", "marginale", "negativo"}
 
     def test_borzano_testo_contiene_avvertenza_se_as_bassa(self, client):
         body = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
@@ -697,4 +698,112 @@ class TestCapSovradimensionamento:
         # deve contenere avvertenza di sovradimensionamento (×, rete, fragil...)
         assert "×" in testo or "rete" in testo.lower() or "fragil" in testo.lower(), (
             f"Taglia user-defined 6.5 kWp (611% consumo) senza avvertenza. Testo: {testo[:200]}"
+        )
+
+
+# ── 20. Orientamento tetto ────────────────────────────────────────────────────
+
+class TestOrientamento:
+    def test_produzione_decrescente_per_orientamento(self, client):
+        """Ordine di produzione robusto per orientamenti significativamente diversi.
+
+        Con TMY reale (Albinea): sud=2.023, sud_est_sud_ovest=2.013, est_o_ovest=1.637,
+        nord=1.140 kWh — ordine fisicamente corretto (S > SSW = -0,5% > W = -19% > N = -44%).
+
+        Con TMY sintetico (sin-curve GHI simmetrico): il modello cos_theta può dare
+        SSW (200°) leggermente > S (180°) per un artefatto — es. sud=2.368, SSW=2.430.
+        La differenza è <5% e fisicamente irrilevante; non vale testare quell'ordinamento.
+        Testiamo solo i gap significativi (>10%) che devono reggere con entrambi i TMY.
+        """
+        produzioni = {}
+        for ori in ("sud", "sud_est_sud_ovest", "est_o_ovest", "nord"):
+            body = client.post("/estimate/casa", json={
+                **_BASE_BOLLETTA, "orientamento": ori,
+            }).json()
+            produzioni[ori] = body["produzione_annua_kwh"]
+        # sud e sud_est_sud_ovest devono essere comparabili (entro 5%)
+        assert abs(produzioni["sud"] - produzioni["sud_est_sud_ovest"]) < produzioni["sud"] * 0.05, (
+            f"sud={produzioni['sud']} e sud_est_sud_ovest={produzioni['sud_est_sud_ovest']} "
+            f"differiscono di più del 5% — artefatto inatteso nel modello"
+        )
+        # differenze significative (>10%) che devono essere rispettate con qualsiasi TMY
+        assert produzioni["sud_est_sud_ovest"] > produzioni["est_o_ovest"], (
+            f"sud_est_sud_ovest={produzioni['sud_est_sud_ovest']} deve essere > est_o_ovest={produzioni['est_o_ovest']}"
+        )
+        assert produzioni["sud"] > produzioni["est_o_ovest"], (
+            f"sud={produzioni['sud']} deve essere > est_o_ovest={produzioni['est_o_ovest']}"
+        )
+        assert produzioni["est_o_ovest"] > produzioni["nord"], (
+            f"est_o_ovest={produzioni['est_o_ovest']} deve essere > nord={produzioni['nord']}"
+        )
+
+    def test_non_so_tra_sud_e_est_o_ovest(self, client):
+        """non_so (SW 225°) produce tra sud_est_sud_ovest (200°) e est_o_ovest (270°)."""
+        produzioni = {}
+        for ori in ("sud_est_sud_ovest", "non_so", "est_o_ovest"):
+            body = client.post("/estimate/casa", json={
+                **_BASE_BOLLETTA, "orientamento": ori,
+            }).json()
+            produzioni[ori] = body["produzione_annua_kwh"]
+        assert produzioni["sud_est_sud_ovest"] >= produzioni["non_so"] >= produzioni["est_o_ovest"], (
+            f"Atteso: sud_est_sud_ovest≥non_so≥est_o_ovest, ottenuto: {produzioni}"
+        )
+
+    def test_default_equivale_non_so(self, client):
+        """Senza orientamento nel payload, default è non_so → stessa produzione."""
+        body_default = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
+        body_non_so = client.post("/estimate/casa", json={
+            **_BASE_BOLLETTA, "orientamento": "non_so",
+        }).json()
+        assert body_default["produzione_annua_kwh"] == pytest.approx(
+            body_non_so["produzione_annua_kwh"], rel=0.001
+        )
+
+    def test_orientamento_in_assunzioni(self, client):
+        """L'orientamento deve comparire nel blocco assunzioni."""
+        for ori in ("sud", "nord", "non_so", "est_o_ovest"):
+            body = client.post("/estimate/casa", json={
+                **_BASE_BOLLETTA, "orientamento": ori,
+            }).json()
+            testo = " ".join(body["assunzioni"]).lower()
+            assert "orientamento" in testo or "azimuth" in testo, (
+                f"Orientamento {ori!r} non trovato nelle assunzioni"
+            )
+
+    def test_non_so_avvertenza_in_assunzioni(self, client):
+        """Per non_so deve comparire un'avvertenza esplicita sull'incertezza."""
+        body = client.post("/estimate/casa", json={
+            **_BASE_BOLLETTA, "orientamento": "non_so",
+        }).json()
+        testo = " ".join(body["assunzioni"])
+        assert "non specificato" in testo or "non noto" in testo or "ignoto" in testo.lower(), (
+            f"Avvertenza non_so non trovata nelle assunzioni"
+        )
+
+    def test_nord_npv_inferiore_a_sud(self, client):
+        """Con stessa taglia fissa, nord ha NPV ≤ sud e produzione inferiore."""
+        body_sud = client.post("/estimate/casa", json={
+            **_BASE_BOLLETTA, "orientamento": "sud", "potenza_kwp": 3.0,
+        }).json()
+        body_nord = client.post("/estimate/casa", json={
+            **_BASE_BOLLETTA, "orientamento": "nord", "potenza_kwp": 3.0,
+        }).json()
+        assert body_nord["produzione_annua_kwh"] < body_sud["produzione_annua_kwh"]
+        assert body_nord["senza_batteria"]["npv_eur"] <= body_sud["senza_batteria"]["npv_eur"]
+
+    def test_borderline_verdetto_cambia_con_orientamento(self, client):
+        """Con consumo medio, il verdetto nord è peggiore o uguale a sud.
+        Se cambia, documenta il senso: nord ≤ sud nella scala ottimo/buono/accettabile/negativo."""
+        body_sud = client.post("/estimate/casa", json={
+            **_BASE_PROXY, "bolletta_kwh": 4_500.0, "orientamento": "sud",
+        }).json()
+        body_nord = client.post("/estimate/casa", json={
+            **_BASE_PROXY, "bolletta_kwh": 4_500.0, "orientamento": "nord",
+        }).json()
+        assert body_nord["produzione_annua_kwh"] < body_sud["produzione_annua_kwh"]
+        grade = {"negativo": 0, "marginale": 0.5, "accettabile": 1, "buono": 2, "ottimo": 3}
+        eti_sud = body_sud["verdetto_pv"]["etichetta"]
+        eti_nord = body_nord["verdetto_pv"]["etichetta"]
+        assert grade[eti_nord] <= grade[eti_sud], (
+            f"Verdetto nord ({eti_nord}) più favorevole di sud ({eti_sud})"
         )

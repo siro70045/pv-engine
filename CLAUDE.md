@@ -102,6 +102,15 @@ Stima pubblica con 5 input form: Comune, tipologia scuola (4 voci: elementare/me
 
 - **Orientamento tetto**: 5 valori Literal — `sud` (180°), `sud_est_sud_ovest` (200°), `est_o_ovest` (270°, una sola falda), `nord` (0°), `non_so` (225° SW, ipotesi prudente). Tilt 30° assunto e dichiarato nelle assunzioni. `est_o_ovest` modella UNA sola falda esposta a est O a ovest (non due falde); un impianto su due falde richiede il Livello 2. Con TMY reale: S=4046, SSW=4025, SW=3858, W=3274, N=2280 kWh per 3 kWp a Albinea 4.500 kWh/anno.
 
+**FASE 2b+2c ✅ COMPLETATA (14 set 2026, commit `2272ae2`)** — Scenario elettrificazione:
+- `gas_smc_annui` (opz.): SCOP calcolato da TMY + tipo terminali; senza gas → benchmark 33 kWh/m² + nota indicativa
+- `gas_smc_estivi_mese` (opz.): separa riscaldamento da ACS+cottura; cottura COP=1.0, ACS COP=2.0–2.5, riscaldamento SCOP=1.90–3.84 da Carnot×η=0.42 TMY
+- `terminali`: termosifoni (T=75°C, SCOP 1.90), ventilconvettori (42.5°C, 3.21), pavimento radiante (37.5°C, 3.64), non_so → termosifoni
+- Distribuzione oraria termica TMY via `calc_hourly_thermal_demand` (engine read-only): delta AS −2.1 pp vs distribuzione piatta
+- Rimosso `consumi_spostati` completamente (schema, router, test)
+- Avvertenza esplicita per termosifoni/non_so: SCOP basso, NPV FV alto non è un vantaggio HP
+- 95 test estimate_casa + 299 altri = 394 verdi totali
+
 **DA FARE — Fase 2**: frontend `/casa/stima`. Prima del lancio, validare il proxy consumo con 2-3 casi reali diversi (una casa tutto-elettrico, una con EV) — finora validato solo su un caso a gas puro a basso consumo.
 
 ## Problemi noti

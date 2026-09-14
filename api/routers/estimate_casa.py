@@ -50,8 +50,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from api.schemas.estimate import CandidatoComune, ComuneRisolto, RangeLowHigh
 from api.schemas.estimate_casa import (
     BeneficioBreakdown,
+    DeltaVsBase,
     EstimateCasaRequest,
     EstimateCasaResponse,
+    MetricheScenarioAlternativo,
+    ScenarioAlternativoOut,
     ScenarioOut,
     TagliaOut,
     TradeoffOut,
@@ -60,7 +63,21 @@ from api.schemas.estimate_casa import (
 from api.utils.cache import get_cached_tmy
 from api.utils.cost import auto_scenarios, estimate_pv_cost_residential
 from buildings import kwp_from_area
-from engine.energy_vectors import BuildingEnergyProfile
+from engine.economics import (
+    FinancialParameters,
+    ItalianIncentives,
+    InvestmentCost,
+    OperatingCost,
+    calc_economics,
+)
+from engine.energy_balance import (
+    BatterySystem,
+    EnergyBalanceInput,
+    GridTariff,
+    simulate_lifetime,
+)
+from engine.energy_vectors import BuildingEnergyProfile, TERMINAL_SUPPLY_TEMP_C, TerminalType
+from engine.heat_pump import calc_h_tr_from_annual, calc_hourly_thermal_demand
 from engine.loads import (
     DHWSystem,
     HVACSystem,
@@ -72,8 +89,25 @@ from engine.loads import (
 )
 from engine.pvgis_client import PVGISError
 from engine.solar import PVSystem, simulate_pv
-from residential.battery_scenario import BatteryScenarioComparison, ScenarioResult, compare_battery_scenarios
-from residential.estimate_defaults import build_residential_consumption_estimate
+from residential.battery_scenario import (
+    BATTERY_REPLACEMENT_COST_EUR_KWH,
+    BatteryScenarioComparison,
+    DEFAULT_ANALYSIS_YEARS,
+    DEFAULT_DISCOUNT_RATE,
+    DEFAULT_ESC_RATE,
+    DEFAULT_EXPORT_PRICE_EUR_KWH,
+    DEFAULT_IMPORT_PRICE_EUR_KWH,
+    DEFAULT_OM_PCT,
+    ScenarioResult,
+    compare_battery_scenarios,
+)
+from residential.estimate_defaults import (
+    _DHW_KWH,
+    _DHW_MAX,
+    _HP_KWH_PER_M2_CENTRAL,
+    build_residential_consumption_estimate,
+)
+from residential.incentives import calc_irpef_deduction
 from school.comuni import Comune, lookup_comune
 
 logger = logging.getLogger("pv_engine_api.estimate_casa")
@@ -118,6 +152,58 @@ _ORIENTAMENTO_AZIMUTH: dict[str, float] = {
     "non_so":            225.0,
 }
 
+# ── Gas → thermal → electrical conversion (for electrification scenario) ─────
+# PCI (Potere Calorifico Inferiore) gas naturale italiano: 9.45 kWh/Smc
+# Fonte: DM 26/06/1993 (Ministero dell'Industria), tabella TERNA/ARERA standard.
+_GAS_PCI_KWH_PER_SMC: float = 9.45
+
+# Rendimento medio caldaia a condensazione: 0.87 (su PCI, classe energetica B+).
+# Fonte: EN 15316-4-1:2017 tabella nazionale. Conservativo rispetto alle classi A+/A++
+# (η > 1.0 su PCI per condensazione piena) per catturare il parco caldaie misto reale.
+_ETA_BOILER: float = 0.87
+
+# SCOP prudente per pompa di calore aria-aria in regime italiano (zona C-E media).
+# Range tipico ENEA RAEE 2023: 2.5–3.5 in base a zona e installazione.
+# 2.5 = limite inferiore (zona F, installazione sub-ottimale): scelta prudente perché
+# stima più consumo elettrico → scenario più conservativo sul beneficio FV.
+_SCOP_PRUDENTE: float = 2.5
+
+# COP pompa di calore per ACS (scaldabagno a pompa di calore):
+# - Più basso di quello di riscaldamento perché la temperatura di accumulo è più alta (45°C).
+# - Conservativo con termosifoni/non_so (2.0): HP ad alta temp. fa anche ACS meno efficiente.
+_COP_ACS_STANDARD: float = 2.5    # terminali buoni (fan coil, pavimento radiante)
+_COP_ACS_CONSERVATIVO: float = 2.0  # termosifoni / non_so (worst case)
+
+# COP per cottura a induzione vs gas (~1:1 come output termico utile):
+# Gas hob η≈0.45; induzione η≈0.85 → 1 kWh_termico_gas ≈ 0.5 kWh_e_induzione.
+# Usiamo COP=1.0 (conservativo) per non sottostimare il consumo elettrico.
+_COP_COTTURA: float = 1.0
+
+# Default SCOP benchmark (senza terminal type, senza gas_smc_annui):
+# 2.75 = ENEA RAEE 2023 (range 2.5–3.5, media zona C-E).
+_SCOP_BENCHMARK: float = 2.75
+
+# Carnot efficiency factor η per HP aria-acqua classe A++ (EN 14825):
+_HP_ETA_CARNOT: float = 0.42
+
+# Temperatura di setpoint riscaldamento [°C] (standard EN 15316-4-2)
+_HP_T_SETPOINT_C: float = 20.0
+
+# Temperatura minima operativa HP [°C] (sotto questo valore HP spenta)
+_HP_T_MIN_C: float = -15.0
+
+# Gas use split quando solo gas_smc_annui è noto (senza gas_smc_estivi_mese).
+# Fonte: ARERA Relazione Annuale 2023; ISTAT Consumi Energetici delle Famiglie 2022.
+# Cottura: base 75 Smc + 15 Smc/occupante (da 2 in poi).
+# ACS: 45 Smc/occupante (UNI TS 11300-2: 50 L/gg × ΔT ~35°C × 4190 J/(kg·K) / PCI / η)
+_GAS_COTTURA_BASE_SMC: float = 75.0
+_GAS_COTTURA_PER_OCCUPANT_SMC: float = 15.0
+_GAS_ACS_SMC_PER_OCCUPANT: float = 45.0
+
+# Quando gas_smc_estivi_mese è fornito, la quota base estate è cottura + ACS.
+# ISTAT: cottura ≈ 35–40% della spesa base estiva per una famiglia con cucina a gas.
+_FRAC_ACS_SU_BASE_ESTIVA: float = 0.60   # 60% ACS, 40% cottura
+
 # Human-readable label for each orientation (used in assunzioni).
 _ORIENTAMENTO_DESC: dict[str, str] = {
     "sud":              "SUD (azimuth 180°, esposizione ottimale)",
@@ -152,6 +238,69 @@ def _battery_size_kwh(consumo_centrale: float) -> float:
 def _fmt_it(value: float) -> str:
     """Integer formatting with Italian thousands separator."""
     return f"{value:,.0f}".replace(",", ".")
+
+
+def _scop_from_tmy(t_ext_hourly: list[float], t_supply_c: float) -> float:
+    """Demand-weighted harmonic mean COP (= SCOP) for a site from TMY temperatures.
+
+    Uses Carnot model with η=0.42 (EN 14825 calibrated, A++ class) and defrost
+    penalty below 5°C. Weighted by degree-hours (thermal demand proxy).
+    """
+    T_hot_K = t_supply_c + 273.15
+    total_demand = 0.0
+    total_elec = 0.0
+    for t_ext in t_ext_hourly:
+        if t_ext >= _HP_T_SETPOINT_C or t_ext <= _HP_T_MIN_C:
+            continue
+        demand = _HP_T_SETPOINT_C - t_ext   # degree-hours (proportional to thermal demand)
+        if demand <= 0:
+            continue
+        T_source_K = t_ext + 273.15
+        delta = T_hot_K - T_source_K
+        if delta <= 0:
+            continue
+        cop = _HP_ETA_CARNOT * T_hot_K / delta
+        if t_ext < 5.0:
+            cop *= 0.85   # defrost penalty
+        if cop <= 0:
+            continue
+        total_demand += demand
+        total_elec += demand / cop
+    if total_elec <= 0:
+        return _SCOP_PRUDENTE
+    return total_demand / total_elec
+
+
+def _terminal_supply_temp(terminali: str | None) -> float:
+    """Return mid-range supply temperature [°C] for the given terminal type."""
+    mapping = {
+        "termosifoni":        TerminalType.OLD_RADIATOR,
+        "pavimento_radiante": TerminalType.RADIANT_FLOOR,
+        "ventilconvettori":   TerminalType.FAN_COIL,
+        "non_so":             TerminalType.OLD_RADIATOR,   # worst-case assumption
+    }
+    term = mapping.get(terminali or "non_so", TerminalType.OLD_RADIATOR)
+    t_lo, t_hi = TERMINAL_SUPPLY_TEMP_C[term]
+    return (t_lo + t_hi) / 2.0
+
+
+def _heating_elec_profile_wh(
+    t_ext_hourly: list[float],
+    heating_kwh_e: float,
+) -> list[float]:
+    """Return winter-concentrated hourly HP electric demand [Wh/h], total = heating_kwh_e kWh.
+
+    Uses TMY-derived H_tr (building heat-loss coefficient) to distribute the
+    annual electrical demand to hours where outdoor T < 20°C (heating season).
+    Because SCOP cancels in the normalization, the shape depends only on temperature.
+    """
+    if heating_kwh_e <= 0:
+        return [0.0] * 8760
+    h_tr = calc_h_tr_from_annual(heating_kwh_e, t_ext_hourly)
+    thermal_Wh = calc_hourly_thermal_demand(t_ext_hourly, h_tr, heating_kwh_e)
+    # thermal_Wh sums to heating_kwh_e kWh (normalized inside calc_hourly_thermal_demand).
+    # Since SCOP cancels, this is already the correct electric profile shape at the right total.
+    return thermal_Wh
 
 
 def _to_scenario_out(sr: ScenarioResult) -> ScenarioOut:
@@ -412,6 +561,76 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
             abitazione_principale=req.abitazione_principale,
             irpef_annua_stimata=req.irpef_annua_stimata,
             battery_kwh=battery_kwh,
+        )
+
+    # ── 7b. Lightweight senza-batteria helper (single simulate_lifetime call) ──
+    # Used only for alternative scenarios (not the primary taglie analysis).
+    # Runs one simulate_lifetime instead of two, halving the cost vs _run_battery.
+    def _quick_sb(
+        pv_h: list[float],
+        demand_Wh: list[float],
+        kwp_val: float,
+        capex_val: int,
+    ) -> ScenarioResult:
+        pv_cost_per_kwp = capex_val / kwp_val
+        detr = calc_irpef_deduction(
+            float(capex_val),
+            abitazione_principale=req.abitazione_principale,
+            irpef_annua_stimata=req.irpef_annua_stimata,
+        )
+        detr_pct = detr.detrazione_totale_eur / capex_val * 100.0 if capex_val > 0 else 0.0
+        tariff = GridTariff(
+            import_price_eur_kWh=DEFAULT_IMPORT_PRICE_EUR_KWH,
+            export_price_eur_kWh=DEFAULT_EXPORT_PRICE_EUR_KWH,
+        )
+        fin = FinancialParameters(
+            discount_rate=DEFAULT_DISCOUNT_RATE,
+            energy_price_escalation=DEFAULT_ESC_RATE,
+            analysis_years=DEFAULT_ANALYSIS_YEARS,
+        )
+        investment = InvestmentCost(
+            pv_cost_eur_kWp=pv_cost_per_kwp,
+            peak_power_kWp=kwp_val,
+            battery_cost_eur_kWh=0.0,
+            battery_capacity_kWh=0.0,
+        )
+        opex = OperatingCost(
+            om_pct_of_capex_per_yr=DEFAULT_OM_PCT,
+            battery_replacement_years=[],
+            battery_replacement_cost_eur_kWh=BATTERY_REPLACEMENT_COST_EUR_KWH,
+        )
+        incentives = ItalianIncentives(
+            detrazione_fiscale_pct=detr_pct,
+            detrazione_spread_years=10,
+            ammortamento_accelerato=False,
+            transizione_5_0_pct=0.0,
+        )
+        inp = EnergyBalanceInput(
+            pv_production_hourly_Wh=pv_h,
+            demand_hourly_Wh=demand_Wh,
+            battery=BatterySystem(capacity_kWh=0.0),
+            tariff=tariff,
+            peak_power_kWp=kwp_val,
+        )
+        yearly = simulate_lifetime(inp, lifetime_years=DEFAULT_ANALYSIS_YEARS)
+        econ = calc_economics(yearly, investment, opex, fin, incentives)
+        yr1 = yearly[0]
+        return ScenarioResult(
+            label="senza_batteria",
+            capex_eur=round(float(capex_val), 0),
+            battery_kwh=0.0,
+            battery_replacement_years=[],
+            autoconsumo_pct=round(yr1.self_consumption_rate * 100, 1),
+            autosufficienza_pct=round(yr1.self_sufficiency_rate * 100, 1),
+            payback_anni=econ.payback_simple_yr,
+            payback_scontato_anni=econ.payback_discounted_yr,
+            npv_eur=econ.npv_eur,
+            irr_pct=econ.irr_pct,
+            detrazione_totale_eur=detr.detrazione_totale_eur,
+            detrazione_effettiva_eur=detr.detrazione_effettiva_eur,
+            risparmio_annuo_anno1_eur=econ.year1_saving_eur + econ.year1_export_revenue_eur,
+            produzione_anno1_kwh=econ.year1_production_kWh,
+            economics=econ,
         )
 
     # ── 8. Compute kwp_vals for the comparison set ────────────────────────────
@@ -682,6 +901,195 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
             "una esposta a nord può produrre ~40-45% in meno rispetto a un tetto a sud."
         )
 
+    # ── 18. Alternative scenarios ("cosa cambierebbe") ─────────────────────────
+    # LIGHT: only central case, no battery, no taglie comparison.
+    # Server-side to avoid frontend doing multiple rate-limited calls.
+    scenari_alternativi: list[ScenarioAlternativoOut] = []
+
+    # ── 18a. Scenario "elettrificazione" ──────────────────────────────────────
+    # Triggered only when the house currently has gas heating (not electric).
+    if not req.riscaldamento_elettrico:
+        # ── Compute site-specific SCOP from TMY + terminal type ───────────────
+        t_ext_hourly = [h.T2m for h in tmy.hourly]
+        terminali = req.terminali   # type: ignore[attr-defined]
+        t_supply_c = _terminal_supply_temp(terminali)
+        scop_heat = _scop_from_tmy(t_ext_hourly, t_supply_c)
+
+        # ACS COP: more conservative for high-temp terminals (termosifoni / non_so)
+        cop_acs = (
+            _COP_ACS_CONSERVATIVO
+            if terminali in ("termosifoni", "non_so") or terminali is None
+            else _COP_ACS_STANDARD
+        )
+
+        # ── Separate gas into cottura / ACS / riscaldamento ──────────────────
+        if req.gas_smc_annui is not None:
+            if req.gas_smc_estivi_mese is not None:
+                # Summer base = cooking + ACS (no heating).
+                base_smc = 12.0 * req.gas_smc_estivi_mese
+                acs_smc = base_smc * _FRAC_ACS_SU_BASE_ESTIVA
+                cottura_smc = base_smc * (1.0 - _FRAC_ACS_SU_BASE_ESTIVA)
+                heating_smc = max(0.0, req.gas_smc_annui - base_smc)
+                fonte_gas = (
+                    f"gas_smc_annui={req.gas_smc_annui:.0f} Smc, "
+                    f"gas_smc_estivi_mese={req.gas_smc_estivi_mese:.1f} Smc/mese → "
+                    f"cottura {cottura_smc:.0f} Smc + ACS {acs_smc:.0f} Smc + "
+                    f"riscaldamento {heating_smc:.0f} Smc"
+                )
+            else:
+                # Default Italian split (ARERA 2023 / ISTAT):
+                # cottura ≈ 75 + 15/occupante, ACS ≈ 45 Smc/occupante.
+                cottura_smc = _GAS_COTTURA_BASE_SMC + max(0, req.n_occupants - 2) * _GAS_COTTURA_PER_OCCUPANT_SMC
+                acs_smc = req.n_occupants * _GAS_ACS_SMC_PER_OCCUPANT
+                # Cap cottura+ACS at 50% of total (prevents negative heating for low-use families)
+                max_base = req.gas_smc_annui * 0.50
+                if cottura_smc + acs_smc > max_base:
+                    ratio = max_base / (cottura_smc + acs_smc)
+                    cottura_smc *= ratio
+                    acs_smc *= ratio
+                heating_smc = max(0.0, req.gas_smc_annui - cottura_smc - acs_smc)
+                fonte_gas = (
+                    f"gas_smc_annui={req.gas_smc_annui:.0f} Smc → split ARERA/ISTAT default: "
+                    f"cottura {cottura_smc:.0f} Smc + ACS {acs_smc:.0f} Smc + "
+                    f"riscaldamento {heating_smc:.0f} Smc"
+                )
+
+            # Convert Smc → thermal kWh → electrical kWh per use
+            cottura_kwh_e = cottura_smc * _GAS_PCI_KWH_PER_SMC * _ETA_BOILER / _COP_COTTURA
+            acs_kwh_e = acs_smc * _GAS_PCI_KWH_PER_SMC * _ETA_BOILER / cop_acs
+            heating_kwh_e = heating_smc * _GAS_PCI_KWH_PER_SMC * _ETA_BOILER / scop_heat
+
+            # Only include ACS if it was gas (otherwise user already has electric ACS)
+            if req.acqua_calda_elettrica:
+                acs_kwh_e = 0.0
+
+            fonte_heating = (
+                f"gas {req.gas_smc_annui:.0f} Smc → riscaldamento {heating_smc:.0f} Smc × "
+                f"η_caldaia {_ETA_BOILER} ÷ SCOP {scop_heat:.2f} "
+                f"({terminali or 'n.d.'}); "
+                f"ACS {acs_smc:.0f} Smc ÷ COP_ACS {cop_acs:.1f}; "
+                f"cottura {cottura_smc:.0f} Smc ÷ COP_cottura {_COP_COTTURA:.0f}"
+            )
+            is_indicative = False
+        else:
+            # ── Benchmark fallback (no gas bill provided) ─────────────────────
+            # Uses area-based HP benchmark + DHW table. Mark as indicative.
+            cottura_kwh_e = 0.0   # cooking stays gas, not modeled
+            heating_kwh_e = req.floor_area_m2 * _HP_KWH_PER_M2_CENTRAL
+            acs_kwh_e = (
+                0.0 if req.acqua_calda_elettrica
+                else float(_DHW_KWH[min(req.n_occupants, _DHW_MAX)])
+            )
+            fonte_heating = (
+                f"benchmark area: {req.floor_area_m2:.0f} m² × {_HP_KWH_PER_M2_CENTRAL} kWh_e/m² "
+                f"(SCOP medio {_SCOP_BENCHMARK}, ENEA RAEE 2023)"
+                + ("" if req.acqua_calda_elettrica
+                   else f" + ACS {acs_kwh_e:.0f} kWh ({req.n_occupants} occupanti)")
+            )
+            is_indicative = True
+
+        consumo_elettrif = round(centrale + heating_kwh_e + acs_kwh_e + cottura_kwh_e, 0)
+
+        # ── Build hourly demand profile with proper thermal distribution ──────
+        # Heating: winter-concentrated via TMY temperatures (PARTE 4).
+        # ACS + cooking: uniform (minimal seasonal variation for simplicity).
+        heating_profile_Wh = _heating_elec_profile_wh(t_ext_hourly, heating_kwh_e)
+        acs_per_hour_Wh = acs_kwh_e * 1000.0 / 8760.0
+        cottura_per_hour_Wh = cottura_kwh_e * 1000.0 / 8760.0
+        base_profile_Wh = _scale(centrale)   # base electric: residential profile unchanged
+        demand_elettrif = [
+            base_profile_Wh[h] + heating_profile_Wh[h] + acs_per_hour_Wh + cottura_per_hour_Wh
+            for h in range(8760)
+        ]
+
+        # Cap-filtered NPV-best kWp for the new (higher) consumption.
+        # We reuse the already-simulated kwp_vals (no new PV simulation needed).
+        def _el_ratio(kv: float) -> float:
+            return taglia_data[kv].produzione_kwh / consumo_elettrif if consumo_elettrif > 0 else float("inf")
+
+        cands_el = [k for k in kwp_vals if _el_ratio(k) <= _MAX_PRODUZIONE_SU_CONSUMO]
+        if not cands_el:
+            cands_el = [min(kwp_vals)]   # force smallest if all exceed cap
+
+        # One simulate_lifetime per candidate (already-cached PV hourly data).
+        el_sb: dict[float, ScenarioResult] = {
+            kv: _quick_sb(taglia_data[kv].pv_hourly_Wh, demand_elettrif, kv, taglia_data[kv].capex)
+            for kv in cands_el
+        }
+        kwp_el = max(cands_el, key=lambda k: el_sb[k].npv_eur)
+        sr_el = el_sb[kwp_el]
+
+        ben_el = _compute_beneficio_breakdown(sr_el)
+        verdetto_el = _compute_verdetto(
+            min(sr_el.payback_anni, 99.0), sr_el.npv_eur,
+            sr_el.autosufficienza_pct, ben_el,
+            prod_ratio=taglia_data[kwp_el].produzione_kwh / consumo_elettrif,
+            capex_eur=float(taglia_data[kwp_el].capex),
+        )
+
+        # ── SCOP label per terminale (human-readable) ─────────────────────────
+        terminali_label = {
+            "termosifoni": "termosifoni (alta temp. 70–80°C, SCOP basso)",
+            "pavimento_radiante": "pavimento radiante (bassa temp. 35–40°C, SCOP ottimale)",
+            "ventilconvettori": "ventilconvettori/fan coil (40–45°C, SCOP buono)",
+            "non_so": "terminale non noto → ipotesi conservativa termosifoni",
+        }.get(terminali or "", f"terminale non specificato → SCOP benchmark {_SCOP_BENCHMARK} (ENEA RAEE 2023)")
+
+        # ── Indicative warning (PARTE 5) ──────────────────────────────────────
+        indicativa_note = ""
+        if is_indicative:
+            indicativa_note = (
+                " ⚠ STIMA INDICATIVA: consumo HP stimato da benchmark area (±50%) perché "
+                "non è stata fornita la bolletta del gas. Fornisci gas_smc_annui per una "
+                "stima più precisa del consumo elettrico con pompa di calore."
+            )
+
+        # ── High-temp terminal warning (termosifoni / non_so) ─────────────────
+        alta_temp_note = ""
+        if terminali in ("termosifoni", "non_so"):
+            alta_temp_note = (
+                " ⚠ Con terminali ad alta temperatura (70–80°C) la pompa di calore "
+                "lavora in regime sfavorevole (SCOP basso): il consumo elettrico stimato "
+                "è più alto rispetto a terminali a bassa temperatura. "
+                "Un NPV dello scenario FV più alto in questo caso riflette un impianto "
+                "più grande dimensionato su un fabbisogno aumentato — non indica un "
+                "vantaggio dell'installazione HP con questi terminali."
+            )
+
+        scenari_alternativi.append(ScenarioAlternativoOut(
+            tipo="elettrificazione",
+            titolo="Cosa cambierebbe con pompa di calore",
+            descrizione=(
+                "PERIMETRO — questo scenario stima come cambierebbe la convenienza del "
+                "fotovoltaico se il riscaldamento (e l'ACS, se a gas) venisse "
+                "elettrificato con pompa di calore. Non valuta se convenga installare "
+                "la pompa di calore: costo HP, incentivi HP e confronto con il gas sono "
+                "fuori perimetro e richiedono l'analisi di Livello 2. "
+                f"Terminali: {terminali_label}. "
+                f"SCOP riscaldamento stimato: {scop_heat:.2f} (Carnot × η={_HP_ETA_CARNOT}, TMY locale). "
+                f"Consumo termico stimato da {fonte_heating}."
+                + alta_temp_note
+                + indicativa_note
+            ),
+            metriche=MetricheScenarioAlternativo(
+                consumo_elettrico_stimato_kwh=consumo_elettrif,
+                kwp_consigliato=round(kwp_el, 1),
+                autosufficienza_pct=sr_el.autosufficienza_pct,
+                payback_anni=round(min(sr_el.payback_anni, 99.0), 1),
+                npv_eur=round(sr_el.npv_eur, 0),
+                etichetta_verdetto=verdetto_el.etichetta,
+            ),
+            delta_vs_base=DeltaVsBase(
+                autosufficienza_pp=round(
+                    sr_el.autosufficienza_pct - sb_central.autosufficienza_pct, 1
+                ),
+                payback_anni=round(
+                    min(sr_el.payback_anni, 99.0) - min(sb_central.payback_anni, 99.0), 1
+                ),
+                npv_eur=round(sr_el.npv_eur - sb_central.npv_eur, 0),
+            ),
+        ))
+
     return EstimateCasaResponse(
         comune_risolto=ComuneRisolto(
             nome=comune.nome,
@@ -715,4 +1123,5 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         taglie_confronto=taglie_confronto,
         capex_indicativo_eur=float(pv_capex),
         assunzioni=assunzioni,
+        scenari_alternativi=scenari_alternativi,
     )

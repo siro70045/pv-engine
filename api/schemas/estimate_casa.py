@@ -84,6 +84,69 @@ class EstimateCasaRequest(BaseModel):
         ),
     )
 
+    # ── Gas consumption (optional, for electrification scenario) ─────────────
+    gas_smc_annui: Optional[float] = Field(
+        default=None, ge=0, le=10_000,
+        description=(
+            "Consumo annuo di gas naturale in Smc (Standard metri cubi), leggibile "
+            "dalla bolletta del gas. Se fornito, viene usato nello scenario di "
+            "elettrificazione per ricavare il fabbisogno termico dall'uso reale "
+            "invece che dal benchmark 33 kWh_e/m². "
+            "Tipicamente include riscaldamento e ACS (entrambi a gas)."
+        ),
+    )
+    gas_smc_estivi_mese: Optional[float] = Field(
+        default=None, ge=0, le=500,
+        description=(
+            "Consumo mensile medio di gas in estate (giugno–agosto) in Smc, quando "
+            "il riscaldamento è spento. Rappresenta solo cottura e ACS. "
+            "Se fornito insieme a gas_smc_annui, permette di separare la quota di "
+            "riscaldamento dagli altri usi e ottenere uno scenario di elettrificazione "
+            "più accurato. Tipicamente 15–35 Smc/mese per una famiglia di 4 persone."
+        ),
+    )
+
+    # ── Terminal type (optional, for electrification scenario SCOP) ───────────
+    terminali: Optional[Literal["termosifoni", "pavimento_radiante", "ventilconvettori", "non_so"]] = Field(
+        default=None,
+        description=(
+            "Tipo di terminali di riscaldamento presenti nell'abitazione. "
+            "Influenza il SCOP (rendimento stagionale) della pompa di calore nello "
+            "scenario di elettrificazione. "
+            "'termosifoni': radiatori ad alta temperatura (70–80°C), meno adatti a HP; "
+            "'pavimento_radiante': riscaldamento a bassa temperatura (35–40°C), ottimale per HP; "
+            "'ventilconvettori': fan coil (40–45°C), buono per HP; "
+            "'non_so': ipotesi conservativa (termosifoni, peggiore caso). "
+            "Se assente, si usa SCOP conservativo 2.5 (zona C-E media)."
+        ),
+    )
+
+
+class MetricheScenarioAlternativo(BaseModel):
+    """Metriche principali di uno scenario alternativo (solo caso centrale, senza batteria)."""
+    consumo_elettrico_stimato_kwh: float
+    kwp_consigliato: float
+    autosufficienza_pct: float
+    payback_anni: float
+    npv_eur: float
+    etichetta_verdetto: Literal["ottimo", "buono", "accettabile", "marginale", "negativo"]
+
+
+class DeltaVsBase(BaseModel):
+    """Delta vs scenario base (senza batteria, domanda centrale, kWp consigliato base)."""
+    autosufficienza_pp: float   # positivo = migliora
+    payback_anni: float         # negativo = migliora (payback più breve)
+    npv_eur: float              # positivo = migliora
+
+
+class ScenarioAlternativoOut(BaseModel):
+    """Scenario 'cosa cambierebbe' — calcolato server-side nella stessa risposta."""
+    tipo: Literal["elettrificazione"]
+    titolo: str
+    descrizione: str
+    metriche: MetricheScenarioAlternativo
+    delta_vs_base: DeltaVsBase
+
 
 class ScenarioOut(BaseModel):
     """Risultato di un singolo scenario (senza o con batteria)."""
@@ -186,3 +249,6 @@ class EstimateCasaResponse(BaseModel):
 
     # ── Human-readable assumptions for the honesty block ─────────────────────
     assunzioni: list[str]
+
+    # ── Alternative scenarios ("cosa cambierebbe") ────────────────────────────
+    scenari_alternativi: list[ScenarioAlternativoOut] = []

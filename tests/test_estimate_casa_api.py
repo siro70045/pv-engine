@@ -807,3 +807,294 @@ class TestOrientamento:
         assert grade[eti_nord] <= grade[eti_sud], (
             f"Verdetto nord ({eti_nord}) più favorevole di sud ({eti_sud})"
         )
+
+
+# ── FASE 2b: scenari_alternativi ─────────────────────────────────────────────
+#
+# NOTE SUI PROFILI DI CARICO (trovata durante sviluppo FASE 2b, set 2026):
+_BORZANO_GAS = {
+    "comune": "Albinea",
+    "provincia": "RE",
+    "n_occupants": 4,
+    "floor_area_m2": 90.0,
+    "bolletta_kwh": 1_435.0,
+    "riscaldamento_elettrico": False,
+    "acqua_calda_elettrica": False,
+    "presenza_diurna": "per_lo_piu_vuota",
+    "orientamento": "sud",
+}
+
+
+class TestScenariAlternativi:
+    # ── presenza / assenza degli scenari ──────────────────────────────────────
+
+    def test_borzano_gas_ha_elettrificazione(self, client):
+        """Casa a gas → scenario elettrificazione presente."""
+        body = client.post("/estimate/casa", json=_BORZANO_GAS).json()
+        tipi = {a["tipo"] for a in body["scenari_alternativi"]}
+        assert "elettrificazione" in tipi, "Manca scenario elettrificazione"
+
+    def test_consumi_spostati_rimosso(self, client):
+        """Scenario 'consumi_spostati' eliminato in FASE 2c (modello non funzionante)."""
+        body = client.post("/estimate/casa", json=_BORZANO_GAS).json()
+        tipi = {a["tipo"] for a in body["scenari_alternativi"]}
+        assert "consumi_spostati" not in tipi, "Scenario consumi_spostati non deve essere presente"
+
+    def test_casa_elettrica_nessuna_elettrificazione(self, client):
+        """riscaldamento_elettrico=True → scenario elettrificazione ASSENTE."""
+        body = client.post("/estimate/casa", json={
+            **_BORZANO_GAS, "riscaldamento_elettrico": True,
+        }).json()
+        tipi = {a["tipo"] for a in body["scenari_alternativi"]}
+        assert "elettrificazione" not in tipi
+        assert "consumi_spostati" not in tipi
+
+    def test_nessuno_scenario_se_elettrico(self, client):
+        """Casa con riscaldamento elettrico → nessuno scenario alternativo."""
+        body = client.post("/estimate/casa", json={
+            **_BORZANO_GAS,
+            "riscaldamento_elettrico": True,
+        }).json()
+        assert body["scenari_alternativi"] == []
+
+    # ── struttura schema ──────────────────────────────────────────────────────
+
+    def test_struttura_scenario_elettrificazione(self, client):
+        """Ogni scenario ha i campi richiesti."""
+        body = client.post("/estimate/casa", json=_BORZANO_GAS).json()
+        el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        assert el["titolo"]
+        assert el["descrizione"]
+        m = el["metriche"]
+        for campo in ("consumo_elettrico_stimato_kwh", "kwp_consigliato",
+                       "autosufficienza_pct", "payback_anni", "npv_eur",
+                       "etichetta_verdetto"):
+            assert campo in m, f"Campo mancante in metriche: {campo}"
+        d = el["delta_vs_base"]
+        for campo in ("autosufficienza_pp", "payback_anni", "npv_eur"):
+            assert campo in d, f"Campo mancante in delta_vs_base: {campo}"
+
+    # ── scenario elettrificazione: consumo e verdetto ─────────────────────────
+
+    def test_elettrificazione_consumo_molto_superiore(self, client):
+        """Con 1435 kWh bolletta + gas, il consumo elettrificato deve essere molto > 1435."""
+        body = client.post("/estimate/casa", json=_BORZANO_GAS).json()
+        el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        consumo_base = body["consumo_kwh_annuo"]   # 1435
+        consumo_el = el["metriche"]["consumo_elettrico_stimato_kwh"]
+        assert consumo_el > consumo_base * 2.0, (
+            f"consumo_elettrificato={consumo_el:.0f} kWh dovrebbe essere >2x il base={consumo_base:.0f}"
+        )
+
+    def test_elettrificazione_verdetto_migliore_del_base(self, client):
+        """Con più consumo, l'FV diventa più conveniente: verdetto migliore o uguale al base."""
+        body = client.post("/estimate/casa", json=_BORZANO_GAS).json()
+        el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        base_npv = body["senza_batteria"]["npv_eur"]
+        el_npv = el["metriche"]["npv_eur"]
+        assert el_npv >= base_npv, (
+            f"NPV elettrificazione ({el_npv:.0f}€) deve essere ≥ NPV base ({base_npv:.0f}€)"
+        )
+
+    def test_elettrificazione_delta_npv_positivo(self, client):
+        """delta_vs_base.npv_eur deve essere positivo (FV migliora con più consumo)."""
+        body = client.post("/estimate/casa", json=_BORZANO_GAS).json()
+        el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        assert el["delta_vs_base"]["npv_eur"] >= 0
+
+    def test_elettrificazione_descrizione_contiene_perimetro(self, client):
+        """La descrizione deve esplicitare che valuta solo il FV, non la HP."""
+        body = client.post("/estimate/casa", json=_BORZANO_GAS).json()
+        el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        desc = el["descrizione"].lower()
+        assert "perimetro" in desc or "fuori" in desc or "livello 2" in desc.lower(), (
+            f"Descrizione manca del disclaimer di perimetro: {desc[:200]}"
+        )
+
+    def test_elettrificazione_scop_in_descrizione(self, client):
+        """La descrizione deve riportare lo SCOP calcolato dal TMY."""
+        body = client.post("/estimate/casa", json=_BORZANO_GAS).json()
+        el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        desc = el["descrizione"].lower()
+        assert "scop" in desc, f"SCOP non dichiarato nella descrizione: {el['descrizione'][:200]}"
+
+    # ── gas_smc_annui: effetto sul consumo elettrificato ──────────────────────
+
+    def test_gas_smc_annui_fornito_vs_assente_consumo_differisce(self, client):
+        """Con gas_smc_annui=800, il consumo elettrificato è diverso dal benchmark."""
+        body_no_gas = client.post("/estimate/casa", json=_BORZANO_GAS).json()
+        body_gas = client.post("/estimate/casa", json={
+            **_BORZANO_GAS, "gas_smc_annui": 800.0,
+        }).json()
+        el_no = next(a for a in body_no_gas["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        el_si = next(a for a in body_gas["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        consumo_no = el_no["metriche"]["consumo_elettrico_stimato_kwh"]
+        consumo_si = el_si["metriche"]["consumo_elettrico_stimato_kwh"]
+        assert consumo_no != consumo_si, (
+            f"gas_smc_annui non influenza il consumo elettrificato: "
+            f"no_gas={consumo_no:.0f} == si_gas={consumo_si:.0f}"
+        )
+
+    def test_gas_smc_annui_descritto_nella_descrizione(self, client):
+        """Quando gas_smc_annui fornito, la fonte è esplicitata nella descrizione."""
+        body = client.post("/estimate/casa", json={
+            **_BORZANO_GAS, "gas_smc_annui": 800.0,
+        }).json()
+        el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        desc = el["descrizione"].lower()
+        assert "smc" in desc or "gas" in desc or "800" in el["descrizione"], (
+            f"Fonte gas_smc_annui non dichiarata nella descrizione: {el['descrizione'][:200]}"
+        )
+
+    def test_gas_smc_annui_grande_aumenta_consumo_elettrificato(self, client):
+        """Più gas → più consumo elettrico equivalente → consumo elettrificato maggiore."""
+        consumo_el = {}
+        for smc in (500, 1_500):
+            body = client.post("/estimate/casa", json={
+                **_BORZANO_GAS, "gas_smc_annui": float(smc),
+            }).json()
+            el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+            consumo_el[smc] = el["metriche"]["consumo_elettrico_stimato_kwh"]
+        assert consumo_el[500] < consumo_el[1_500], (
+            f"gas 500 Smc ({consumo_el[500]:.0f}) deve dare consumo < gas 1500 Smc ({consumo_el[1_500]:.0f})"
+        )
+
+    # ── gas_smc_estivi_mese: separazione usi del gas ──────────────────────────
+
+    def test_gas_smc_estivi_mese_riduce_riscaldamento(self, client):
+        """Con gas_smc_estivi_mese, la quota riscaldamento è minore (resto = cottura+ACS)."""
+        body_no_est = client.post("/estimate/casa", json={
+            **_BORZANO_GAS, "gas_smc_annui": 1_200.0,
+        }).json()
+        body_est = client.post("/estimate/casa", json={
+            **_BORZANO_GAS, "gas_smc_annui": 1_200.0, "gas_smc_estivi_mese": 25.0,
+        }).json()
+        el_no = next(a for a in body_no_est["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        el_si = next(a for a in body_est["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        # Con estivi_mese=25 → base annua = 300 Smc → riscaldamento = 900 Smc
+        # Default split: cottura+ACS per 4 persone ≈ 255 Smc → riscaldamento = 945 Smc
+        # La differenza di consumo elettrificato riflette la diversa separazione
+        consumo_no = el_no["metriche"]["consumo_elettrico_stimato_kwh"]
+        consumo_si = el_si["metriche"]["consumo_elettrico_stimato_kwh"]
+        assert consumo_no != consumo_si, (
+            f"gas_smc_estivi_mese non influenza il consumo: no={consumo_no:.0f}, si={consumo_si:.0f}"
+        )
+
+    def test_gas_smc_estivi_mese_in_descrizione(self, client):
+        """Con gas_smc_estivi_mese, la fonte è esplicitata nella descrizione."""
+        body = client.post("/estimate/casa", json={
+            **_BORZANO_GAS, "gas_smc_annui": 1_000.0, "gas_smc_estivi_mese": 20.0,
+        }).json()
+        el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        desc = el["descrizione"].lower()
+        assert "20" in el["descrizione"] or "smc" in desc, (
+            f"gas_smc_estivi_mese non dichiarato: {el['descrizione'][:200]}"
+        )
+
+    # ── terminali: SCOP per tipo di terminale ────────────────────────────────
+
+    def test_terminali_scop_migliore_per_pavimento(self, client):
+        """SCOP migliore con pavimento radiante → consumo elettrico < termosifoni."""
+        consumo_per_terminale = {}
+        for terminale in ("termosifoni", "ventilconvettori", "pavimento_radiante"):
+            body = client.post("/estimate/casa", json={
+                **_BORZANO_GAS, "gas_smc_annui": 1_200.0, "terminali": terminale,
+            }).json()
+            el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+            consumo_per_terminale[terminale] = el["metriche"]["consumo_elettrico_stimato_kwh"]
+        # Migliore SCOP → meno elettricità necessaria per lo stesso fabbisogno termico
+        assert consumo_per_terminale["pavimento_radiante"] < consumo_per_terminale["termosifoni"], (
+            f"pavimento_radiante ({consumo_per_terminale['pavimento_radiante']:.0f}) "
+            f"deve consumare meno di termosifoni ({consumo_per_terminale['termosifoni']:.0f})"
+        )
+        assert consumo_per_terminale["ventilconvettori"] < consumo_per_terminale["termosifoni"], (
+            f"ventilconvettori ({consumo_per_terminale['ventilconvettori']:.0f}) "
+            f"deve consumare meno di termosifoni ({consumo_per_terminale['termosifoni']:.0f})"
+        )
+
+    def test_terminali_non_so_come_termosifoni(self, client):
+        """terminali=non_so → SCOP conservativo (stesso comportamento di termosifoni)."""
+        body_ts = client.post("/estimate/casa", json={
+            **_BORZANO_GAS, "gas_smc_annui": 1_000.0, "terminali": "termosifoni",
+        }).json()
+        body_ns = client.post("/estimate/casa", json={
+            **_BORZANO_GAS, "gas_smc_annui": 1_000.0, "terminali": "non_so",
+        }).json()
+        el_ts = next(a for a in body_ts["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        el_ns = next(a for a in body_ns["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        assert el_ts["metriche"]["consumo_elettrico_stimato_kwh"] == pytest.approx(
+            el_ns["metriche"]["consumo_elettrico_stimato_kwh"], abs=50.0
+        ), "terminali=non_so deve dare consumo simile a termosifoni (stesso supply temp)"
+
+    def test_terminali_in_descrizione(self, client):
+        """Il tipo di terminale è riportato nella descrizione."""
+        for terminale in ("termosifoni", "pavimento_radiante", "ventilconvettori"):
+            body = client.post("/estimate/casa", json={
+                **_BORZANO_GAS, "gas_smc_annui": 800.0, "terminali": terminale,
+            }).json()
+            el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+            assert terminale in el["descrizione"] or terminale.split("_")[0] in el["descrizione"].lower(), (
+                f"Terminale '{terminale}' non dichiarato nella descrizione: {el['descrizione'][:200]}"
+            )
+
+    def test_termosifoni_avvertenza_alta_temperatura_in_descrizione(self, client):
+        """Con termosifoni o non_so, la descrizione avverte che SCOP è basso e NPV alto non è un vantaggio HP."""
+        for term in ("termosifoni", "non_so"):
+            body = client.post("/estimate/casa", json={
+                **_BORZANO_GAS, "gas_smc_annui": 800.0, "terminali": term,
+            }).json()
+            el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+            desc = el["descrizione"].lower()
+            assert "alta temperatura" in desc or "regime sfavorevole" in desc, (
+                f"terminali={term}: manca avvertenza alta temperatura nella descrizione: "
+                f"{el['descrizione'][:300]}"
+            )
+
+    def test_pavimento_nessuna_avvertenza_alta_temperatura(self, client):
+        """Con pavimento_radiante NON deve comparire l'avvertenza alta temperatura."""
+        body = client.post("/estimate/casa", json={
+            **_BORZANO_GAS, "gas_smc_annui": 800.0, "terminali": "pavimento_radiante",
+        }).json()
+        el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        assert "alta temperatura" not in el["descrizione"].lower(), (
+            "Avvertenza alta temperatura non deve comparire con pavimento_radiante"
+        )
+
+    # ── indicativa senza gas_smc_annui (PARTE 5) ──────────────────────────────
+
+    def test_senza_gas_nota_indicativa_in_descrizione(self, client):
+        """Senza gas_smc_annui, la descrizione segnala la stima come indicativa."""
+        body = client.post("/estimate/casa", json=_BORZANO_GAS).json()
+        el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        desc = el["descrizione"].lower()
+        assert "indicat" in desc or "benchmark" in desc, (
+            f"Stima indicativa non segnalata in assenza di gas_smc_annui: {el['descrizione'][:300]}"
+        )
+
+    def test_con_gas_smc_nessuna_nota_indicativa(self, client):
+        """Con gas_smc_annui, la nota 'indicativa' non deve apparire."""
+        body = client.post("/estimate/casa", json={
+            **_BORZANO_GAS, "gas_smc_annui": 1_000.0,
+        }).json()
+        el = next(a for a in body["scenari_alternativi"] if a["tipo"] == "elettrificazione")
+        assert "indicativa" not in el["descrizione"].lower(), (
+            "Nota 'indicativa' non deve apparire quando gas_smc_annui è fornito"
+        )
+
+    # ── campi di risposta backward-compatible ─────────────────────────────────
+
+    def test_scenari_alternativi_lista_vuota_per_default_schema(self, client):
+        """scenari_alternativi è una lista (mai None, nemmeno se vuota)."""
+        body = client.post("/estimate/casa", json={
+            **_BORZANO_GAS,
+            "riscaldamento_elettrico": True,
+        }).json()
+        assert isinstance(body["scenari_alternativi"], list)
+
+    def test_schema_backward_compat_senza_gas_smc(self, client):
+        """gas_smc_annui è opzionale: richieste senza non cambiano gli altri campi."""
+        body_old = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
+        # Tutti i campi pre-FASE-2b devono essere invariati
+        for campo in ("consumo_kwh_annuo", "kwp_ipotizzato", "produzione_annua_kwh",
+                       "verdetto_pv", "senza_batteria", "taglie_confronto"):
+            assert campo in body_old

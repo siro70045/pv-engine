@@ -334,18 +334,18 @@ def compare_battery_scenarios(
 
     if batt_conv:
         nota = (
-            f"La batteria da {battery_kwh:.0f} kWh aumenta l'autoconsumo "
-            f"di {delta_ac:+.1f} pp e il suo NPV a {analysis_years} anni è "
-            f"superiore di €{delta_npv:,.0f} rispetto al solo FV. "
-            f"Il payback si allunga di {delta_pb:+.1f} anni."
+            f"La batteria da {battery_kwh:.0f} kWh conviene: dopo {analysis_years} anni "
+            f"ti restano €{delta_npv:,.0f} in più in tasca rispetto al solo fotovoltaico. "
+            f"L'autoconsumo cresce di {delta_ac:+.1f} punti percentuali; "
+            f"il tempo di rientro si allunga di {delta_pb:+.1f} anni."
         )
     else:
         nota = (
-            f"⚠ La batteria da {battery_kwh:.0f} kWh NON è conveniente "
-            f"nelle assunzioni correnti: NPV inferiore di €{abs(delta_npv):,.0f} "
-            f"rispetto al solo FV (payback più lungo di {delta_pb:+.1f} anni). "
-            f"L'autoconsumo aumenta di {delta_ac:+.1f} pp ma il costo aggiuntivo "
-            f"(€{delta_cap:,.0f}) non è recuperato nell'orizzonte di analisi."
+            f"⚠ La batteria da {battery_kwh:.0f} kWh non conviene: "
+            f"dopo {analysis_years} anni ti resterebbe €{abs(delta_npv):,.0f} in meno "
+            f"in tasca rispetto al solo fotovoltaico (il tempo di rientro si allunga di {delta_pb:+.1f} anni). "
+            f"L'autoconsumo cresce di {delta_ac:+.1f} punti percentuali, "
+            f"ma il costo aggiuntivo (€{delta_cap:,.0f}) non viene recuperato."
         )
     if con.battery_replacement_years:
         nota += (

@@ -374,56 +374,58 @@ def _compute_verdetto(
 
     if etichetta == "negativo":
         testo = (
-            f"⚠ Investimento difficile da giustificare nelle assunzioni correnti: "
-            f"payback ~{pb:.1f} anni, NPV a 25 anni {npv:+,.0f} €. "
-            "Riconsiderare la taglia o aggiornare il consumo reale."
+            f"⚠ Con questa taglia il conto non torna: recupereresti la spesa in "
+            f"~{pb:.1f} anni e dopo 25 anni ti resterebbe {npv:+,.0f} € in tasca. "
+            "Valuta una taglia diversa o controlla il consumo reale con Livello 2."
         )
         if sovradimensionato:
             testo += (
-                f" (nota: l'impianto produce circa {prod_ratio:.1f}× il consumo stimato — "
-                "molta dell'energia va in vendita alla rete)"
+                f" L'impianto produce circa {prod_ratio:.1f} volte il tuo consumo: "
+                "gran parte dell'energia andrebbe venduta alla rete."
             )
     elif etichetta == "marginale":
         parti = [
-            f"⚠ Investimento fragile: payback ~{pb:.1f} anni, NPV a 25 anni appena positivo "
-            f"+€{_fmt_it(npv)} (meno del 10% del capitale investito di €{_fmt_it(capex_eur)}).",
-            "Una variazione del prezzo di cessione (0,08 €/kWh), dell'aliquota IRPEF o "
-            "dell'escalation elettrica può facilmente portare l'NPV sotto zero.",
-            "Prima di procedere è consigliata l'analisi di Livello 2 con i dati reali dell'abitazione.",
+            f"⚠ Investimento fragile: recupereresti la spesa in ~{pb:.1f} anni "
+            f"e dopo 25 anni ti resterebbero +€{_fmt_it(npv)} in tasca — "
+            f"meno del 10% dei {_fmt_it(capex_eur)} € spesi.",
+            "Basta una variazione del prezzo di vendita alla rete (oggi 0,08 €/kWh), "
+            "dell'aliquota IRPEF o dei prezzi dell'elettricità per azzerare quel margine.",
+            "Prima di decidere ti consigliamo l'analisi di Livello 2 con i dati reali della tua casa.",
         ]
         if bassa_as:
             parti.append(
-                f"⚠ Autosufficienza stimata {autosufficienza_pct:.0f}%: il beneficio dipende "
-                "in larga misura dalla detrazione fiscale e dai ricavi di cessione."
+                f"Con il {autosufficienza_pct:.0f}% di copertura stimata, il vantaggio "
+                "dipende soprattutto dalla detrazione fiscale e dalla vendita alla rete, "
+                "non da un effettivo risparmio in bolletta."
             )
         testo = " ".join(parti)
     else:
         grade_label = {
-            "ottimo": "Investimento eccellente",
-            "buono": "Investimento buono",
+            "ottimo": "Ottimo investimento",
+            "buono": "Buon investimento",
             "accettabile": "Investimento accettabile",
         }[etichetta]
         parti = [
-            f"{grade_label}: payback ~{pb:.1f} anni, NPV a 25 anni +€{_fmt_it(npv)}.",
+            f"{grade_label}: recuperi la spesa in ~{pb:.1f} anni "
+            f"e dopo 25 anni ti restano +€{_fmt_it(npv)} in tasca.",
             (
-                f"Beneficio anno 1: risparmio bolletta €{beneficio.risparmio_bolletta_eur:.0f}"
-                f" + export €{beneficio.ricavi_export_eur:.0f}"
-                f" + quota detrazione €{beneficio.quota_detrazione_eur:.0f}"
-                f" = €{beneficio.totale_anno1_eur:.0f}."
+                f"Al primo anno: risparmi €{beneficio.risparmio_bolletta_eur:.0f} in bolletta"
+                f" + €{beneficio.ricavi_export_eur:.0f} venduti alla rete"
+                f" + €{beneficio.quota_detrazione_eur:.0f} di detrazione"
+                f" = €{beneficio.totale_anno1_eur:.0f} totali."
             ),
         ]
         if bassa_as:
             parti.append(
-                f"⚠ Autosufficienza stimata {autosufficienza_pct:.0f}%: l'impianto copre "
-                f"solo una quota ridotta del fabbisogno. Il beneficio dipende in larga "
-                f"misura dalla detrazione fiscale e dai ricavi di cessione — non da una "
-                f"effettiva riduzione dei prelievi dalla rete."
+                f"L'impianto copre circa il {autosufficienza_pct:.0f}% del tuo fabbisogno annuo. "
+                "Gran parte del beneficio viene dalla detrazione fiscale e dalla vendita alla rete, "
+                "non dal risparmio diretto in bolletta."
             )
         if sovradimensionato:
             parti.append(
-                f"⚠ L'impianto produce circa {prod_ratio:.1f}× il consumo annuo stimato: "
-                "la convenienza dipende in larga parte dalla vendita alla rete (0,08 €/kWh) "
-                "e dalla detrazione fiscale — assunzioni fragili."
+                f"⚠ L'impianto produce circa {prod_ratio:.1f} volte il tuo consumo annuo: "
+                "gran parte dell'energia va venduta alla rete (0,08 €/kWh). "
+                "La convenienza è fragile se quel prezzo cambia."
             )
         testo = " ".join(parti)
 
@@ -801,23 +803,24 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
                 taglia_data[k].cmp.senza_batteria.npv_eur for k in candidates_nel_cap
             )
             testo_neg = (
-                f"⚠ Nessuna taglia sensata per questa casa (produzione ≤{_fmt_it(limite_kwh)} kWh/anno, "
-                f"cioè ≤{_MAX_PRODUZIONE_SU_CONSUMO * 100:.0f}% del consumo stimato) risulta "
-                f"conveniente nelle assunzioni correnti (NPV migliore nel ventaglio sensato: "
-                f"{best_npv_nel_cap:+,.0f} €). "
-                "Le taglie più grandi hanno NPV assoluto più alto, ma producono principalmente "
-                "per la rete a 0,08 €/kWh — assunzione fragile. "
-                "Verificare il consumo reale o richiedere l'analisi di Livello 2."
+                f"⚠ Nelle condizioni attuali, nessuna delle taglie proporzionate alla tua casa "
+                f"(produzione fino a {_fmt_it(limite_kwh)} kWh/anno — il {_MAX_PRODUZIONE_SU_CONSUMO * 100:.0f}% "
+                f"del tuo consumo) si ripaga in modo soddisfacente: il risultato migliore è "
+                f"{best_npv_nel_cap:+,.0f} € in tasca dopo 25 anni. "
+                "Gli impianti più grandi sembrano più convenienti sulla carta, "
+                "ma quasi tutto l'extra andrebbe venduto alla rete a 0,08 €/kWh — "
+                "un'ipotesi che può cambiare nel tempo. "
+                "Verifica il tuo consumo reale o chiedi l'analisi di Livello 2."
             )
         else:
             # forza_minima: even min candidate exceeds cap
             min_prod = _fmt_it(taglia_data[min(kwp_vals)].produzione_kwh)
             testo_neg = (
-                f"⚠ Anche la taglia minima di mercato supera il "
-                f"{_MAX_PRODUZIONE_SU_CONSUMO * 100:.0f}% del consumo stimato "
-                f"({min_prod} kWh/anno prodotti vs {_fmt_it(centrale)} kWh/anno consumati): "
-                "qualunque impianto produrrebbe principalmente per la rete. "
-                "Verificare il consumo reale o richiedere l'analisi di Livello 2."
+                f"⚠ Anche il più piccolo impianto disponibile supera il "
+                f"{_MAX_PRODUZIONE_SU_CONSUMO * 100:.0f}% del tuo consumo stimato "
+                f"({min_prod} kWh prodotti contro i {_fmt_it(centrale)} kWh che consumi): "
+                "qualsiasi impianto produrrebbe principalmente per la rete. "
+                "Verifica il consumo reale o chiedi l'analisi di Livello 2."
             )
         verdetto_pv = VerdettoPV(
             payback_anni=verdetto_pv.payback_anni,
@@ -841,64 +844,65 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         else "occupazione diurna alta (pensionati / smart-working)"
     )
     consumo_fonte_label = (
-        f"Consumo fornito dalla bolletta: {_fmt_it(centrale)} kWh/anno (banda ±15%)"
+        f"Consumi dalla bolletta: {_fmt_it(centrale)} kWh/anno (±15%)"
         if consumo_da_bolletta
         else (
-            f"Consumo stimato dal proxy: {_fmt_it(centrale)} kWh/anno "
-            f"({_fmt_it(basso)}–{_fmt_it(alto)} kWh/anno, "
-            f"banda {'±45%' if req.riscaldamento_elettrico else '±30%'})"
+            f"Consumo annuo stimato: {_fmt_it(centrale)} kWh "
+            f"(da {_fmt_it(basso)} a {_fmt_it(alto)} kWh, "
+            f"margine {'±45%' if req.riscaldamento_elettrico else '±30%'})"
         )
     )
     if auto_dimensionato:
         if forza_minima:
             sizing_note = (
-                "taglia minima disponibile — tutti i candidati superano il "
+                "taglia minima disponibile — tutti gli impianti superano il "
                 f"{_MAX_PRODUZIONE_SU_CONSUMO * 100:.0f}% del consumo stimato"
             )
         elif all_taglie_negative:
             sizing_note = (
-                f"taglia meno sfavorevole tra quelle sensate "
-                f"(produzione ≤{_MAX_PRODUZIONE_SU_CONSUMO * 100:.0f}% consumo) — NPV negativo per tutte"
+                f"taglia con il miglior risultato tra quelle proporzionate alla casa "
+                f"(produzione ≤{_MAX_PRODUZIONE_SU_CONSUMO * 100:.0f}% del consumo) — nessuna conveniente"
             )
         else:
             sizing_note = (
-                f"taglia selezionata per NPV massimo tra i candidati sensati "
-                f"(produzione ≤{_MAX_PRODUZIONE_SU_CONSUMO * 100:.0f}% del consumo stimato)"
+                f"taglia con il miglior risultato tra quelle proporzionate alla casa "
+                f"(produzione ≤{_MAX_PRODUZIONE_SU_CONSUMO * 100:.0f}% del consumo)"
             )
     else:
         sizing_note = "potenza indicata dall'utente"
 
     assunzioni = [
         consumo_fonte_label,
-        f"Profilo di presenza diurna: {profilo_label}",
-        f"Superficie: {_fmt_it(req.floor_area_m2)} m² → area tetto stimata "
-        f"{_fmt_it(roof_area)} m² (metà della superficie lorda, falda inclinata)",
+        f"Profilo d'uso: {profilo_label}",
+        f"Superficie abitativa: {_fmt_it(req.floor_area_m2)} m² → "
+        f"area di tetto stimata: {_fmt_it(roof_area)} m² (circa la metà, falda inclinata)",
         zona_label,
-        f"Impianto: {kwp:.1f} kWp, tilt 30° (assunto, falda tipica italiana), close_roof, {sizing_note}",
-        f"Orientamento falda: {_ORIENTAMENTO_DESC[req.orientamento]}",
-        f"CAPEX indicativo residenziale: €{_fmt_it(pv_capex)} totali "
-        f"(€{pv_cost_per_kwp:,.0f}/kWp medio, include €1.500 costi fissi "
-        f"ponteggio/inverter/CILA)",
-        f"Batteria confrontata: {battery_kwh:.0f} kWh nominali "
-        f"(totale €{_fmt_it(battery_kwh * 550)} — €550/kWh installato, ENEA RAEE 2023)",
-        f"Detrazione IRPEF: {'50%' if req.abitazione_principale else '36%'} "
-        f"{'(abitazione principale)' if req.abitazione_principale else '(altro immobile)'}, "
-        f"10 quote annuali, tetto €96.000 — art. 16-bis TUIR (L. 207/2024)",
-        "Prezzi energia: 0,25 €/kWh acquisto, 0,08 €/kWh cessione; "
-        "orizzonte 25 anni, degrado FV 0,5 %/anno, escalation elettricità 2,5 %/anno",
-        "⚠ Detrazione 50% valida per spese 2026 (L. 207/2024): "
-        "scende al 36% dal 2027 salvo ulteriori proroghe.",
-        "⚠ Prezzo di cessione 0,08 €/kWh (scambio sul posto GSE 2026): "
-        "in caso di rinegoziazione o passaggio a ritiro dedicato il ricavo può variare.",
-        "Stima preliminare automatica — i valori reali dipendono dall'abitazione "
-        "specifica e richiedono l'analisi di Livello 2",
+        f"Impianto: {kwp:.1f} kWp, inclinazione 30° (falda tipica), {sizing_note}",
+        f"Orientamento tetto: {_ORIENTAMENTO_DESC[req.orientamento]}",
+        f"Costo indicativo dell'impianto: €{_fmt_it(pv_capex)} totali "
+        f"(€{pv_cost_per_kwp:,.0f}/kWp in media; include €1.500 di costi fissi: "
+        f"ponteggio, inverter, CILA)",
+        f"Batteria nell'alternativa: {battery_kwh:.0f} kWh "
+        f"(costo €{_fmt_it(battery_kwh * 550)} — €550/kWh installato, fonte ENEA RAEE 2023)",
+        f"Detrazione fiscale (IRPEF): {'50%' if req.abitazione_principale else '36%'} "
+        f"{'per l\'abitazione principale' if req.abitazione_principale else '(altro immobile)'}, "
+        f"recuperata in 10 anni, tetto €96.000 (art. 16-bis TUIR, L. 207/2024)",
+        "Prezzi usati: 0,25 €/kWh per l'energia acquistata, 0,08 €/kWh per quella venduta alla rete; "
+        "orizzonte di analisi 25 anni, degrado impianto 0,5 %/anno, "
+        "rivalutazione prezzi elettricità 2,5 %/anno",
+        "⚠ La detrazione al 50% vale per spese sostenute nel 2026 (L. 207/2024). "
+        "Dal 2027 scende al 36%, salvo nuove proroghe.",
+        "⚠ Il prezzo di vendita alla rete (0,08 €/kWh, GSE scambio sul posto 2026) "
+        "può variare se le condizioni cambiano.",
+        "Stima automatica di Livello 1 — i valori reali dipendono dalla tua casa "
+        "e richiedono l'analisi di Livello 2",
     ]
     assunzioni.extend(avvertenze_consumo)
     if req.orientamento == "non_so":
         assunzioni.append(
-            "⚠ Orientamento tetto non specificato: la stima usa sud-ovest (azimuth 225°) "
-            "come ipotesi prudente. Una falda esposta a est o a ovest può produrre ~15-20% in meno; "
-            "una esposta a nord può produrre ~40-45% in meno rispetto a un tetto a sud."
+            "⚠ Orientamento non dichiarato: calcoliamo con esposizione a sud-ovest (ipotesi prudente). "
+            "Un tetto esposto a est o a ovest produce circa il 15-20% in meno; "
+            "uno esposto a nord circa il 40-45% in meno rispetto a un tetto a sud."
         )
 
     # ── 18. Alternative scenarios ("cosa cambierebbe") ─────────────────────────
@@ -1029,45 +1033,47 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
 
         # ── SCOP label per terminale (human-readable) ─────────────────────────
         terminali_label = {
-            "termosifoni": "termosifoni (alta temp. 70–80°C, SCOP basso)",
-            "pavimento_radiante": "pavimento radiante (bassa temp. 35–40°C, SCOP ottimale)",
-            "ventilconvettori": "ventilconvettori/fan coil (40–45°C, SCOP buono)",
-            "non_so": "terminale non noto → ipotesi conservativa termosifoni",
-        }.get(terminali or "", f"terminale non specificato → SCOP benchmark {_SCOP_BENCHMARK} (ENEA RAEE 2023)")
+            "termosifoni": "termosifoni a radiatori (70–80°C — rendimento pompa basso)",
+            "pavimento_radiante": "pavimento radiante (35–40°C — rendimento pompa ottimale)",
+            "ventilconvettori": "ventilconvettori/fan coil (40–45°C — rendimento pompa buono)",
+            "non_so": "terminali non dichiarati — calcolato come termosifoni (ipotesi prudente)",
+        }.get(terminali or "", f"terminali non specificati — SCOP benchmark {_SCOP_BENCHMARK} (ENEA RAEE 2023)")
 
         # ── Indicative warning (PARTE 5) ──────────────────────────────────────
         indicativa_note = ""
         if is_indicative:
             indicativa_note = (
-                " ⚠ STIMA INDICATIVA: consumo HP stimato da benchmark area (±50%) perché "
-                "non è stata fornita la bolletta del gas. Fornisci gas_smc_annui per una "
-                "stima più precisa del consumo elettrico con pompa di calore."
+                " ⚠ Stima indicativa (±50%): non hai fornito i consumi di gas, "
+                "quindi il fabbisogno elettrico della pompa di calore è stimato da un benchmark "
+                "di area. Per una stima più precisa, aggiungi i metri cubi di gas annui."
             )
 
         # ── High-temp terminal warning (termosifoni / non_so) ─────────────────
         alta_temp_note = ""
         if terminali in ("termosifoni", "non_so"):
             alta_temp_note = (
-                " ⚠ Con terminali ad alta temperatura (70–80°C) la pompa di calore "
-                "lavora in regime sfavorevole (SCOP basso): il consumo elettrico stimato "
-                "è più alto rispetto a terminali a bassa temperatura. "
-                "Un NPV dello scenario FV più alto in questo caso riflette un impianto "
-                "più grande dimensionato su un fabbisogno aumentato — non indica un "
-                "vantaggio dell'installazione HP con questi terminali."
+                " ⚠ Attenzione: i termosifoni lavorano ad alta temperatura (70–80°C). "
+                "Con questi terminali la pompa di calore è meno efficiente "
+                "e il consumo elettrico stimato è più alto rispetto a un impianto con pavimento radiante. "
+                "Se in questo scenario il fotovoltaico sembra più conveniente, "
+                "è perché si dimensiona su un fabbisogno più alto — "
+                "non perché i termosifoni siano un vantaggio per la pompa di calore."
             )
 
         scenari_alternativi.append(ScenarioAlternativoOut(
             tipo="elettrificazione",
             titolo="Cosa cambierebbe con pompa di calore",
             descrizione=(
-                "PERIMETRO — questo scenario stima come cambierebbe la convenienza del "
-                "fotovoltaico se il riscaldamento (e l'ACS, se a gas) venisse "
-                "elettrificato con pompa di calore. Non valuta se convenga installare "
-                "la pompa di calore: costo HP, incentivi HP e confronto con il gas sono "
-                "fuori perimetro e richiedono l'analisi di Livello 2. "
+                "PERIMETRO: questo scenario risponde a una domanda specifica — "
+                "quanto cambierebbe la convenienza del fotovoltaico se il riscaldamento "
+                "(e l'acqua calda, se a gas) passasse a una pompa di calore? "
+                "Non dice se convenga installare la pompa di calore: "
+                "costi dell'impianto, incentivi e confronto col gas rimangono fuori da questa analisi "
+                "e richiedono il Livello 2. "
                 f"Terminali: {terminali_label}. "
-                f"SCOP riscaldamento stimato: {scop_heat:.2f} (Carnot × η={_HP_ETA_CARNOT}, TMY locale). "
-                f"Consumo termico stimato da {fonte_heating}."
+                f"Rendimento stimato (SCOP): {scop_heat:.2f} "
+                f"(modello Carnot × η={_HP_ETA_CARNOT}, dati climatici locali). "
+                f"Fabbisogno termico: {fonte_heating}."
                 + alta_temp_note
                 + indicativa_note
             ),

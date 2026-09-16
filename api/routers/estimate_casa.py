@@ -884,9 +884,13 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         f"ponteggio, inverter, CILA)",
         f"Batteria nell'alternativa: {battery_kwh:.0f} kWh "
         f"(costo €{_fmt_it(battery_kwh * 550)} — €550/kWh installato, fonte ENEA RAEE 2023)",
-        f"Detrazione fiscale (IRPEF): {'50%' if req.abitazione_principale else '36%'} "
-        f"{'per l\'abitazione principale' if req.abitazione_principale else '(altro immobile)'}, "
-        f"recuperata in 10 anni, tetto €96.000 (art. 16-bis TUIR, L. 207/2024)",
+        (
+            "Detrazione fiscale (IRPEF): "
+            + ("50%" if req.abitazione_principale else "36%")
+            + " "
+            + ("per l'abitazione principale" if req.abitazione_principale else "(altro immobile)")
+            + ", recuperata in 10 anni, tetto €96.000 (art. 16-bis TUIR, L. 207/2024)"
+        ),
         "Prezzi usati: 0,25 €/kWh per l'energia acquistata, 0,08 €/kWh per quella venduta alla rete; "
         "orizzonte di analisi 25 anni, degrado impianto 0,5 %/anno, "
         "rivalutazione prezzi elettricità 2,5 %/anno",

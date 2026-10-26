@@ -7,3 +7,6 @@ __pycache__/
 .DS_Store
 .pvgis_cache/
 .claude/
+
+# Streamlit secrets (API keys): never commit
+.streamlit/secrets.toml

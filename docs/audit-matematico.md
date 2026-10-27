@@ -1,5 +1,7 @@
 # Audit matematico di Meridiana — dal comune e dalla bolletta al verdetto
 
+> **Note for English-speaking readers.** This is a line-by-line mathematical audit of Meridiana, written in Italian and kept exactly as it was on 4 October 2026. It also covers a Google Solar roof integration that was still in progress and is not yet in this repository, so some `file:line` references point to code that is not public or has since moved. None of the findings has been fixed yet. An English summary of the findings is in my MIT Maker Portfolio (Meridiana PDF, Section 5).
+
 **Data:** 4 ottobre 2026 · **Perimetro:** flusso residenziale `POST /estimate/casa` e i moduli del motore che usa · **Modalità:** sola lettura, nessuna modifica al codice.
 
 > **Nota sulla versione.** L'audit fotografa il *working tree* al 4/10/2026, che contiene modifiche non ancora committate (integrazione Google Solar: `residential/roof_google.py`, `api/routers/estimate_casa.py`, `api/schemas/estimate_casa.py`). I riferimenti `file:riga` valgono per quello stato.

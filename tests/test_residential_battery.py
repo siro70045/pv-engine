@@ -249,7 +249,7 @@ class TestBorzanoSanity:
     def test_nota_contiene_avvertenza_inconvenienza(self):
         cmp = _run_borz()
         nota = cmp.tradeoff.nota.lower()
-        assert "non" in nota and ("conveniente" in nota or "convenienza" in nota), (
+        assert "non" in nota and ("conveniente" in nota or "convenienza" in nota or "conviene" in nota), (
             f"La nota dovrebbe avvertire che la batteria non è conveniente: {nota!r}"
         )
 

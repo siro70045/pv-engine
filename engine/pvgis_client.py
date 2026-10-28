@@ -245,10 +245,21 @@ def _fetch_raw(url: str) -> dict:
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw)
         except urllib.error.HTTPError as e:
-            last_error = PVGISError(
-                f"PVGIS HTTP {e.code}: {e.reason}. "
-                f"Check coordinates are within PVGIS coverage area."
-            )
+            # Keep PVGIS's own explanation: it tells a bad location apart from
+            # a server problem.
+            try:
+                body = e.read().decode("utf-8", "replace")
+                message = json.loads(body).get("message", body)
+            except Exception:
+                message = ""
+            message = str(message)[:300]
+            if e.code == 400 and "sea" in message.lower():
+                last_error = PVGISLocationError(f"PVGIS HTTP 400: {message}")
+            else:
+                last_error = PVGISError(
+                    f"PVGIS HTTP {e.code}: {e.reason}. {message} "
+                    f"Check coordinates are within PVGIS coverage area."
+                )
             break   # HTTP errors are not retryable
         except urllib.error.URLError as e:
             last_error = PVGISError(
@@ -411,6 +422,11 @@ def _aggregate_monthly(hourly: list[HourlyRecord]) -> MonthlyClimate:
 
 class PVGISError(Exception):
     """Raised when the PVGIS API returns an error or unexpected data."""
+
+
+class PVGISLocationError(PVGISError):
+    """Raised when PVGIS rejects the coordinates themselves, e.g. a point over
+    the sea or a lagoon ("Location over the sea"). Callers can retry nearby."""
 
 
 def fetch_tmy(

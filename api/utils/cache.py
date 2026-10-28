@@ -25,7 +25,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from engine.pvgis_client import TMYResult, _tmy_from_dict, fetch_tmy
+from engine.pvgis_client import PVGISLocationError, TMYResult, _tmy_from_dict, fetch_tmy
 
 logger = logging.getLogger("pv_engine_api.cache")
 
@@ -76,9 +76,43 @@ def _memory_cache(lat_r: float, lon_r: float) -> TMYResult:
     if disk is not None:
         return disk
     # Bypass pvgis_client's own disk cache — we manage persistence here.
-    tmy = fetch_tmy(lat=lat_r, lon=lon_r, use_cache=False)
+    try:
+        tmy = fetch_tmy(lat=lat_r, lon=lon_r, use_cache=False)
+    except PVGISLocationError:
+        tmy = _fetch_nearest_land(lat_r, lon_r)
     _save_to_disk(lat_r, lon_r, tmy)
     return tmy
+
+
+# Some municipal centroids fall in water (Venice's lies in the lagoon), and
+# PVGIS refuses points over the sea. We then search outward on rings of eight
+# points roughly 2, 4, 6 and 8 km away and use the first point PVGIS accepts.
+# At that distance the typical weather year is practically the same; the shift
+# is logged. If no land is found, the original error is raised.
+_LAND_SEARCH_STEPS_DEG = (0.02, 0.04, 0.06, 0.08)
+_LAND_SEARCH_DIRECTIONS = (
+    (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1),
+)
+
+
+def _fetch_nearest_land(lat: float, lon: float) -> TMYResult:
+    last_error: Optional[PVGISLocationError] = None
+    for step in _LAND_SEARCH_STEPS_DEG:
+        for dlat, dlon in _LAND_SEARCH_DIRECTIONS:
+            lat_t = round(lat + dlat * step, 4)
+            lon_t = round(lon + dlon * step, 4)
+            try:
+                tmy = fetch_tmy(lat=lat_t, lon=lon_t, use_cache=False)
+            except PVGISLocationError as e:
+                last_error = e
+                continue
+            logger.warning(
+                "PVGIS: (%.2f, %.2f) is over water; using nearest land point (%.4f, %.4f)",
+                lat, lon, lat_t, lon_t,
+            )
+            return tmy
+    assert last_error is not None
+    raise last_error
 
 
 def get_cached_tmy(lat: float, lon: float) -> tuple[TMYResult, bool]:

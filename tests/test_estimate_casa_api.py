@@ -1413,3 +1413,13 @@ class TestMultiFalda:
     def test_nota_falde_nelle_assunzioni(self, gable_client):
         body = gable_client.post("/estimate/casa", json=self._REQ).json()
         assert any(a.startswith("Falde usate:") for a in body["assunzioni"])
+
+
+class TestNpvPerTasso:
+    def test_tre_tassi_e_coerenza_col_5(self, client):
+        body = client.post("/estimate/casa", json={**_BASE_PROXY, "potenza_kwp": 3.0}).json()
+        sb = body["senza_batteria"]
+        tassi = {r["tasso_pct"]: r["npv_eur"] for r in sb["npv_per_tasso"]}
+        assert set(tassi) == {3.0, 4.0, 5.0}
+        assert abs(tassi[5.0] - sb["npv_eur"]) <= 2      # same cash flows, same rate
+        assert tassi[3.0] > tassi[4.0] > tassi[5.0]       # lower rate, higher NPV

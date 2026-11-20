@@ -194,6 +194,12 @@ class ScenarioAlternativoOut(BaseModel):
     delta_vs_base: DeltaVsBase
 
 
+class NpvTasso(BaseModel):
+    """NPV of the same cash flows at another discount rate (for the full report)."""
+    tasso_pct: float
+    npv_eur: float
+
+
 class ScenarioOut(BaseModel):
     """Risultato di un singolo scenario (senza o con batteria)."""
     label: str
@@ -208,6 +214,9 @@ class ScenarioOut(BaseModel):
     detrazione_effettiva_eur: float
     risparmio_annuo_anno1_eur: float
     produzione_anno1_kwh: float
+    # Same cash flows discounted at 3 / 4 / 5 % (5 % = the rate used everywhere
+    # else). Decision 20 nov 2026: keep 5 %, show the others in the report.
+    npv_per_tasso: list[NpvTasso] = []
 
 
 class TradeoffOut(BaseModel):

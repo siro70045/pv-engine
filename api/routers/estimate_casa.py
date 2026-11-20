@@ -55,6 +55,7 @@ from api.schemas.estimate_casa import (
     EstimateCasaResponse,
     FaldaRilevata,
     MetricheScenarioAlternativo,
+    NpvTasso,
     ScenarioAlternativoOut,
     ScenarioOut,
     TagliaOut,
@@ -329,6 +330,17 @@ def _heating_elec_profile_wh(
     return thermal_Wh
 
 
+# Discount rates shown side by side in the full report. 5 % is the engine's rate
+# (≈ 10-year BTP net of tax, ~3,8 % in Nov 2026, plus a small risk premium).
+_TASSI_CONFRONTO_PCT: tuple[float, ...] = (3.0, 4.0, 5.0)
+
+
+def _npv_at(sr: ScenarioResult, rate: float) -> float:
+    """Re-discount the scenario's annual net cash flows at another rate."""
+    flows = sr.economics.cash_flows
+    return -sr.capex_eur + sum(cf.net_cash_flow_eur / (1.0 + rate) ** cf.year for cf in flows)
+
+
 def _to_scenario_out(sr: ScenarioResult) -> ScenarioOut:
     return ScenarioOut(
         label=sr.label,
@@ -343,6 +355,10 @@ def _to_scenario_out(sr: ScenarioResult) -> ScenarioOut:
         detrazione_effettiva_eur=sr.detrazione_effettiva_eur,
         risparmio_annuo_anno1_eur=sr.risparmio_annuo_anno1_eur,
         produzione_anno1_kwh=sr.produzione_anno1_kwh,
+        npv_per_tasso=[
+            NpvTasso(tasso_pct=t, npv_eur=round(_npv_at(sr, t / 100.0), 0))
+            for t in _TASSI_CONFRONTO_PCT
+        ],
     )
 
 

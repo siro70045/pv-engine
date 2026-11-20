@@ -56,12 +56,19 @@ from api.schemas.estimate_casa import (
     FaldaRilevata,
     MetricheScenarioAlternativo,
     NpvTasso,
+    OmbraOut,
     ScenarioAlternativoOut,
     ScenarioOut,
     TagliaOut,
     TettoRilevato,
     TradeoffOut,
     VerdettoPV,
+)
+from residential.shading import (
+    ShadingClass,
+    classify as classify_shading,
+    google_alert,
+    loss_with_mlpe_pct,
 )
 from residential.roof_google import (
     RoofData,
@@ -103,7 +110,7 @@ from engine.loads import (
     calc_loads,
 )
 from engine.pvgis_client import PVGISError
-from engine.solar import PVSystem, simulate_pv
+from engine.solar import PVSystem, SystemLosses, simulate_pv
 from residential.battery_scenario import (
     BATTERY_REPLACEMENT_COST_EUR_KWH,
     BatteryScenarioComparison,
@@ -597,6 +604,15 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
     else:
         kwp_max = kwp_from_area(roof_area, "roof_integrated", 100.0)
 
+    # ── 4c. Near shading (Livello 2 answers; absent = 3 % forfait as before) ──
+    _ombra: Optional[ShadingClass] = (
+        classify_shading(req.ombra_ostacoli, req.ombra_lati, req.ombra_durata)
+        if req.ombra_ostacoli is not None else None
+    )
+    _losses = (
+        SystemLosses(shading_near=_ombra.loss_pct / 100.0) if _ombra is not None else SystemLosses()
+    )
+
     def _simulate_kwp(kv: float) -> tuple[list[float], float]:
         """Hourly AC [W] and annual kWh for kv kWp on this roof."""
         if _multi_falda:
@@ -606,14 +622,15 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
                 res_i = simulate_pv(
                     tmy,
                     PVSystem(peak_power_kWp=k_i, tilt_deg=plan_i.segment.pitch_deg,
-                             azimuth_deg=plan_i.segment.azimuth_deg),
+                             azimuth_deg=plan_i.segment.azimuth_deg, system_losses=_losses),
                     mounting="close_roof",
                 )
                 total = [a + h.P_ac_W for a, h in zip(total, res_i.hourly)]
                 prod += res_i.production_annual_kWh
             return total, prod
         res = simulate_pv(
-            tmy, PVSystem(peak_power_kWp=kv, tilt_deg=tilt_deg, azimuth_deg=azimuth),
+            tmy, PVSystem(peak_power_kWp=kv, tilt_deg=tilt_deg, azimuth_deg=azimuth,
+                          system_losses=_losses),
             mounting="close_roof",
         )
         return [h.P_ac_W for h in res.hourly], res.production_annual_kWh
@@ -1064,6 +1081,13 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         "e richiedono l'analisi di Livello 2",
     ]
     assunzioni.extend(avvertenze_consumo)
+    if _ombra is not None:
+        assunzioni.append(
+            f"Ombre vicine: {_ombra.label.lower()} → perdita stimata {_fmt_it(_ombra.loss_pct)}% "
+            f"della produzione annua (fascia {_fmt_it(_ombra.loss_low_pct)}–{_fmt_it(_ombra.loss_high_pct)}%). "
+            "Stima nostra basata sul test NREL su tetti residenziali; l'ombra è distribuita "
+            "su tutto l'anno, mentre nella realtà pesa solo in alcune ore."
+        )
 
     if _google_usato and _google_roof is not None:
         assunzioni.extend([
@@ -1294,11 +1318,48 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
                 migliore=(seg is _google_best),
                 usata=any(p.segment is seg for p in _multi_falda),
             ))
+        _falde_da_controllare = (
+            [p.segment for p in _multi_falda] if _multi_falda
+            else ([_google_best] if _google_best is not None else [])
+        )
         tetto_rilevato = TettoRilevato(
             falde=falde_out,
             imagery_quality=_google_roof.imagery_quality,
             imagery_date=_google_roof.imagery_date_str,
             usato_nel_calcolo=_google_usato,
+            ombra_probabile=any(google_alert(s.sunshine_quantiles) for s in _falde_da_controllare),
+        )
+
+    ombra_out: Optional[OmbraOut] = None
+    if _ombra is not None:
+        _keep = 1.0 - _ombra.loss_pct / 100.0
+
+        def _prod_at(loss_pct: float) -> float:
+            return round(produzione_annua_kwh / _keep * (1.0 - loss_pct / 100.0), 0)
+
+        _nota = (
+            "Valore indicativo: un'ombra che cade a mezzogiorno pesa più di una al mattino. "
+            "Lo verifichiamo sulla foto aerea durante la revisione."
+        )
+        if _ombra.consiglia_ottimizzatori:
+            _nota += (
+                " Con ottimizzatori o microinverter (che gestiscono ogni pannello separatamente) "
+                "si recupera circa un terzo della perdita dovuta all'ombra."
+            )
+        ombra_out = OmbraOut(
+            classe=_ombra.key,
+            descrizione=_ombra.label,
+            perdita_pct=_ombra.loss_pct,
+            perdita_banda_pct=RangeLowHigh(low=_ombra.loss_low_pct, high=_ombra.loss_high_pct),
+            produzione_banda_kwh=RangeLowHigh(
+                low=_prod_at(_ombra.loss_high_pct), high=_prod_at(_ombra.loss_low_pct)
+            ),
+            consiglia_ottimizzatori=_ombra.consiglia_ottimizzatori,
+            perdita_con_ottimizzatori_pct=(
+                round(loss_with_mlpe_pct(_ombra), 1) if _ombra.consiglia_ottimizzatori else None
+            ),
+            da_verificare=_ombra.da_verificare or bool(tetto_rilevato and tetto_rilevato.ombra_probabile),
+            nota=_nota,
         )
 
     return EstimateCasaResponse(
@@ -1340,4 +1401,5 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         assunzioni=assunzioni,
         scenari_alternativi=scenari_alternativi,
         tetto_rilevato=tetto_rilevato,
+        ombra=ombra_out,
     )

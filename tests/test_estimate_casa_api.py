@@ -1423,3 +1423,47 @@ class TestNpvPerTasso:
         assert set(tassi) == {3.0, 4.0, 5.0}
         assert abs(tassi[5.0] - sb["npv_eur"]) <= 2      # same cash flows, same rate
         assert tassi[3.0] > tassi[4.0] > tassi[5.0]       # lower rate, higher NPV
+
+
+# ── Ombre vicine (Livello 2) ─────────────────────────────────────────────────
+
+class TestOmbre:
+    _BASE = {**_BASE_PROXY, "potenza_kwp": 3.0}
+
+    def test_senza_risposte_nessun_blocco_ombra(self, client):
+        body = client.post("/estimate/casa", json=self._BASE).json()
+        assert body.get("ombra") is None
+
+    def test_nessun_ostacolo_uguale_al_livello_1(self, client):
+        base = client.post("/estimate/casa", json=self._BASE).json()
+        no = client.post("/estimate/casa", json={**self._BASE, "ombra_ostacoli": "no"}).json()
+        assert no["produzione_annua_kwh"] == base["produzione_annua_kwh"]
+        assert no["ombra"]["perdita_pct"] == 3.0 and not no["ombra"]["consiglia_ottimizzatori"]
+
+    def test_ombra_da_sud_riduce_la_produzione(self, client):
+        base = client.post("/estimate/casa", json=self._BASE).json()
+        sud = client.post("/estimate/casa", json={
+            **self._BASE, "ombra_ostacoli": "si", "ombra_lati": ["sud"], "ombra_durata": "qualche_ora",
+        }).json()
+        ratio = sud["produzione_annua_kwh"] / base["produzione_annua_kwh"]
+        assert ratio == pytest.approx((1 - 0.12) / (1 - 0.03), abs=0.003)
+        o = sud["ombra"]
+        assert o["classe"] == "sud_qualche_ora" and o["consiglia_ottimizzatori"]
+        assert o["produzione_banda_kwh"]["low"] < sud["produzione_annua_kwh"] < o["produzione_banda_kwh"]["high"]
+        assert any("Ombre vicine" in a for a in sud["assunzioni"])
+
+    def test_non_so_segnalato_per_revisione(self, client):
+        body = client.post("/estimate/casa", json={**self._BASE, "ombra_ostacoli": "non_so"}).json()
+        assert body["ombra"]["da_verificare"] is True
+
+    def test_si_senza_lato_422(self, client):
+        r = client.post("/estimate/casa", json={**self._BASE, "ombra_ostacoli": "si"})
+        assert r.status_code == 422
+
+
+def test_avviso_ombra_google_borzano_assente(google_client):
+    """Borzano's used face has a narrow sunshine distribution → no shading alert."""
+    body = google_client.post("/estimate/casa", json={
+        **_BORZANO_LATLON, "conferma_tetto": True, "tipo_abitazione": "casa",
+    }).json()
+    assert body["tetto_rilevato"]["ombra_probabile"] is False

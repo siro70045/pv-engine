@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from api.schemas.estimate import CandidatoComune, ComuneRisolto, RangeLowHigh
 
@@ -32,6 +32,22 @@ class TettoRilevato(BaseModel):
     imagery_quality: str              # "HIGH" | "MEDIUM" | "BASE"
     imagery_date: str                 # "YYYY-MM-DD"
     usato_nel_calcolo: bool           # True only when conferma_tetto=True and data was applied
+    # Detector only (never a correction): a used face whose sunshine distribution
+    # is wide (p10 far below the median) is probably shaded → manual review.
+    ombra_probabile: bool = False
+
+
+class OmbraOut(BaseModel):
+    """Near-shading class from the user's answers (Livello 2)."""
+    classe: str
+    descrizione: str
+    perdita_pct: float                 # central annual production loss used in the calculation
+    perdita_banda_pct: RangeLowHigh
+    produzione_banda_kwh: RangeLowHigh # annual production if the loss were low / high
+    consiglia_ottimizzatori: bool
+    perdita_con_ottimizzatori_pct: Optional[float] = None
+    da_verificare: bool                # flag for the founder's manual review
+    nota: str
 
 
 class EstimateCasaRequest(BaseModel):
@@ -166,6 +182,28 @@ class EstimateCasaRequest(BaseModel):
             "non l'area (rimane la stima floor_area × 0.5)."
         ),
     )
+
+    # ── Near shading (optional, Livello 2) ────────────────────────────────────
+    # Absent = Livello 1 behaviour (3 % forfait, no "ombra" block in the response).
+    ombra_ostacoli: Optional[Literal["no", "si", "non_so"]] = Field(
+        default=None,
+        description=(
+            "Ci sono alberi o edifici più alti del tetto entro una ventina di metri? "
+            "'no' | 'si' | 'non_so'. Se 'si' servono ombra_lati e ombra_durata."
+        ),
+    )
+    ombra_lati: list[Literal["sud", "est", "ovest"]] = Field(
+        default_factory=list, description="Da che lato sono gli ostacoli (uno o più)."
+    )
+    ombra_durata: Optional[Literal["qualche_ora", "buona_parte"]] = Field(
+        default=None, description="Per quanto fanno ombra sul tetto: qualche ora o buona parte del giorno."
+    )
+
+    @model_validator(mode="after")
+    def _ombra_completa(self) -> "EstimateCasaRequest":
+        if self.ombra_ostacoli == "si" and (not self.ombra_lati or self.ombra_durata is None):
+            raise ValueError("con ombra_ostacoli='si' servono ombra_lati e ombra_durata")
+        return self
 
 
 class MetricheScenarioAlternativo(BaseModel):
@@ -313,3 +351,6 @@ class EstimateCasaResponse(BaseModel):
 
     # ── Google Solar roof geometry (present when lat/lon were provided) ───────
     tetto_rilevato: Optional[TettoRilevato] = None
+
+    # ── Near shading (present when ombra_ostacoli was provided) ──────────────
+    ombra: Optional[OmbraOut] = None

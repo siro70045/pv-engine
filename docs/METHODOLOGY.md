@@ -2,7 +2,9 @@
 
 > Documento di riferimento sul funzionamento interno del motore Meridiana. Pensato per ingegneri, consulenti, valutatori di fondazione, RUP di Comune e Provincia: chi legge deve poter risalire dalle formule al codice e contestare ogni assunzione.
 
-Versione: maggio 2026 · Repo: `pv_engine` · Branch: `main`
+Versione: novembre 2026 · Repo: `pv_engine` · Branch: `main`
+
+> **Novità di questa edizione (20 novembre 2026).** Dopo un audit matematico interno (`docs/audit-matematico.md`) e una ricerca sui prezzi di mercato: costo degli impianti residenziali ricalibrato su dati GSE/IEA (§6.1); sostituzione dell'inverter a carico dell'utente (§6.2); energia ceduta valorizzata al ritiro dedicato GSE con una propria rivalutazione (§6.3); capienza IRPEF considerata nel calcolo (§6.4); temperatura dei pannelli aderenti al tetto corretta (§2.4); posizione del sole calcolata nell'istante a cui si riferisce il dato PVGIS (§2.1); nuova sezione sul segmento residenziale (§7-bis). Per le case queste modifiche hanno spostato i risultati in entrambe le direzioni; per le scuole cambiano solo le correzioni fisiche (§2.1), con effetti dell'ordine dello 0,1%.
 
 ---
 
@@ -41,7 +43,9 @@ Le ore di un anno sono 8 760; ognuna di esse è accompagnata da un set di variab
 | `WD10m` | Direzione vento | ° |
 | `SP` | Pressione superficiale | Pa |
 
-PVGIS restituisce inoltre l'**orizzonte locale**: 36 valori di altezza apparente dell'orizzonte ogni 10° di azimuth (passo di campionamento parametrico in `engine/solar.py:548`). Lo usiamo per calcolare lo **shading topografico**: ore in cui il sole sta sotto il profilo dell'orizzonte vengono escluse dalla produzione (`engine/solar.py:532-555`).
+**Orizzonte topografico (colline, montagne).** La richiesta a PVGIS usa `usehorizon=1`: PVGIS calcola l'orizzonte dal modello digitale del terreno e lo applica **direttamente ai dati del TMY**, azzerando la radiazione diretta nelle ore in cui il sole è dietro il rilievo (metadati della risposta: `use_horizon: true`, `horizon_db: DEM-calculated`). Lo abbiamo verificato sui dati di Albinea (20/11/2026): verso sud-ovest, dove c'è l'Appennino, sotto i 4° di altezza solare la radiazione diretta è nulla in 37 ore su 37 nei pomeriggi invernali, mentre verso est (pianura) è presente. Il profilo d'orizzonte non è incluso nella risposta del TMY, quindi la funzione del motore che lo applicherebbe (`engine/solar.py`, `_is_horizon_shaded`) resta inattiva: è il comportamento corretto, perché applicarlo di nuovo conterebbe l'ombra due volte.
+
+**Istante di riferimento.** I valori orari di irraggiamento non sono riferiti al centro dell'ora ma a `HH:00 + irradiance_time_offset` (0,1756 h ad Albinea, cioè circa HH:10), un dato presente nella risposta PVGIS. Il motore lo legge e lo usa per la posizione del sole (§2.1).
 
 **Cache.** La risposta JSON grezza è scritta su disco in `.pvgis_cache/` (`engine/pvgis_client.py:54`) con chiave deterministica derivata dal MD5 delle coordinate arrotondate a 4 decimali (`engine/pvgis_client.py:193-196`). Le chiamate successive sulla stessa località saltano l'API. Una seconda cache di livello superiore (TMY parsificato) vive nel layer API (`api/main.py` — vedi commit `2704305`).
 
@@ -51,7 +55,7 @@ PVGIS restituisce inoltre l'**orizzonte locale**: 36 valori di altezza apparente
 
 - **Risoluzione spaziale.** PVGIS produce TMY ricampionando griglia satellitare nominalmente ~0.1° (~11 km) sulle componenti SARAH2. Microclimi inferiori a questa scala (foschia di valle ricorrente, isole urbane di calore, nebbie persistenti) **non sono catturati**.
 - **TMY ≠ anno reale.** Il TMY è statistica, non meteo. Un singolo anno futuro sarà più scuro o più chiaro. Per studi di sensitività vera al rischio meteorologico servirebbe simulazione su 15+ anni reali — non implementata.
-- **Orizzonte topografico, non costruito.** L'orizzonte di PVGIS è il rilievo geografico, non gli edifici circostanti. Lo shading da palazzi vicini, alberi alti, ciminiere **non è modellato** automaticamente: va inserito manualmente come `SystemLosses.shading_near` (default 3% sull'anno, `engine/solar.py:187`).
+- **Orizzonte topografico, non costruito.** L'orizzonte di PVGIS è il rilievo geografico, non gli edifici circostanti. Lo shading da palazzi vicini, alberi alti, ciminiere **non è modellato** automaticamente: entra come perdita forfettaria `SystemLosses.shading_near` (default 3% sull'anno, `engine/solar.py:187`). Per la stima residenziale di Livello 2 sono previste classi di ombra dichiarate dall'utente (§7-bis).
 - **Formato timestamp.** PVGIS ha cambiato formato timestamp intorno al 2024; il parser supporta entrambi (`engine/pvgis_client.py:323-337`). Anno di riferimento del TMY è virtuale (es. `0001-MM-DD HH:MM` o `YYYYMMDD:HHMM`).
 
 ---
@@ -70,7 +74,9 @@ I due percorsi sono **bit-near-identical** (≤ 2–3 % di scarto annuale): lo s
 
 ### 2.1 Posizione del sole
 
-Algoritmo Spencer (1971) per declinazione (`engine/solar.py:305`) e equazione del tempo (`engine/solar.py:313`); calcolo zenith/azimuth dalla declinazione, latitudine e angolo orario in `engine/solar.py:325-374`. Il percorso pvlib usa `pvlib.solarposition.get_solarposition` (NREL SPA equivalente, `engine/solar.py:694`). Per Italia entrambi danno errore < 0.1° su tutto l'anno.
+Declinazione con la formula di Cooper (`engine/solar.py:310`, errore ≲ 1°) ed equazione del tempo di Spencer (1971) (`engine/solar.py:318`); calcolo zenith/azimuth dalla declinazione, latitudine e angolo orario (`engine/solar.py:330`). Il percorso pvlib usa `pvlib.solarposition.get_solarposition` (NREL SPA), ma **pvlib non è installato in produzione**: gira sempre il percorso standalone.
+
+**Istante del calcolo.** La posizione del sole è calcolata all'istante a cui si riferisce l'irraggiamento PVGIS, `HH:00 + irradiance_time_offset` (§1), e non più al centro dell'ora (HH:30) come fino a novembre 2026. Con 20 minuti di sfasamento le falde est e ovest ricevevano un angolo di incidenza sbagliato: per 3 kWp a 30° ad Albinea la correzione vale sud +0,1%, sud-ovest −1,9%, est +3,3%, ovest −3,0%. Se il dato non è disponibile (TMY sintetici, file vecchi) si usa il centro dell'ora.
 
 ### 2.2 Decomposizione GHI → POA (Plane of Array)
 
@@ -102,11 +108,13 @@ I coefficienti U₀, U₁ dipendono dal montaggio (`FAIMAN_COEFFICIENTS`, `engin
 | Mounting | U₀ [W/m²K] | U₁ [W·s/m³K] |
 |---|---:|---:|
 | `open_rack` (a terra/free-standing) | 25.0 | 6.84 |
-| `close_roof` (filo tetto, scarsa ventilazione) | 29.0 | 0.00 |
+| `close_roof` (filo tetto, scarsa ventilazione) | 20.0 | 0.00 |
 | `integrated_roof` (BIPV) | 15.0 | 0.00 |
 | `flat_roof_ballast` (tetto piano zavorrato) | 20.0 | 0.00 |
 
 Quando U₁=0 il vento non aiuta a raffreddare — assunzione conservativa per montaggi aderenti.
+
+Fino a novembre 2026 `close_roof` (il montaggio usato per le case) aveva U₀ = 29, un valore da pannelli ben ventilati: ottimista di circa il 4,5% sulla produzione residenziale. Ora vale 20, il valore PVsyst per i moduli semi-integrati con intercapedine d'aria.
 
 ### 2.5 Potenza DC
 
@@ -344,7 +352,7 @@ Riferimenti normativi nei docstring: IEC 62619:2022 (sicurezza batterie), IEC 61
 
 - **Prezzo base / off-peak.** `import_price_eur_kWh` è il prezzo base. Con `time_of_use=False` è la tariffa flat applicata a ogni kWh importato. Con `time_of_use=True` è il prezzo off-peak; il prezzo peak nelle `peak_hours` è `import_price_eur_kWh × peak_price_multiplier`.
 - **TOU (Time-of-Use)** semplificato: ore peak configurabili (default 8:00–20:59) con moltiplicatore `peak_price_multiplier` (default 1.5×) sul prezzo base.
-- **Net metering** (Scambio sul Posto): credito = `min(export, cap) × import_price`; sopra il cap, eccesso pagato a `export_price` (`engine/energy_balance.py:720-725`). Lo SSP è chiuso per nuovi impianti dal 2024 ma resta nel motore per stime su impianti esistenti.
+- **Net metering** (Scambio sul Posto): credito = `min(export, cap) × import_price`; sopra il cap, eccesso pagato a `export_price` (`engine/energy_balance.py:720-725`). Lo SSP non è più attivabile per gli impianti entrati in esercizio dopo il 29/05/2025 (delibera ARERA 78/2025/R/efr) ma resta nel motore per stime su impianti esistenti. I nuovi impianti residenziali sono valorizzati al ritiro dedicato (§6.3).
 - **Demand charge saving**: per utenze BT/MT con tariffa basata sulla potenza di picco mensile, il modello calcola il risparmio in € moltiplicando il delta-peak (con vs senza batteria) per `demand_charge_eur_kW_month` (`engine/energy_balance.py:765-770`).
 
 **Simmetria baseline ↔ actual.** Il calcolo del risparmio economico applica la stessa regola tariffaria (flat o TOU) sia al baseline (`grid_cost_without_pv_eur`) sia allo scenario con FV (`grid_cost_with_pv_eur`). Sotto tariffa TOU le ore peak sono valutate a `import_price × peak_multiplier` e le ore off-peak al prezzo base, e lo stesso prezzo orario è usato per i due lati. Garantire questa simmetria è necessario perché il FV tende a coprire preferenzialmente le ore peak: usare TOU solo sull'actual e flat sul baseline produrrebbe un risparmio apparente sistematicamente *sottostimato* (e, in scenari con FV concentrata su ore peak, anche negativo). Il fix è documentato come anomalia ✅ Voce #10 (Categoria 3) nel `CLAUDE.md`.
@@ -380,6 +388,14 @@ I kilowattora prodotti, autoconsumati ed esportati hanno senso solo se tradotti 
 - **Batteria** (opzionale): `battery_cost_eur_kWh · battery_capacity_kWh`. Default `550 €/kWh` (LFP AC-coupled).
 - **Progettazione/permessi/connessione/altro**: voci esplicite, default 0.
 
+**Residenziale (stima casa).** Il costo chiavi in mano, IVA 10% inclusa, senza batteria, è una parte fissa più una parte proporzionale ai kWp (`api/utils/cost.py`, ricalibrato il 20/11/2026):
+
+> **C(kWp) = 2.500 € + 1.150 €/kWp** (fascia: bassa 1.800 + 1.000 · kWp, alta 3.200 + 1.450 · kWp)
+
+La parte fissa copre sopralluogo, progetto, inverter, connessione alla rete (Modello Unico), collaudo e sicurezza sul tetto; quella variabile pannelli, strutture, cavi, posa e margine. Per questo il costo per kWp scende con la taglia: 2.800 €/kWp a 1,5 kWp, 1.980 a 3 kWp, 1.570 a 6 kWp. A 6 kWp la curva dà 1,57 €/W, contro 1,53 €/W medi rilevati dal GSE per gli impianti residenziali sotto i 10 kW (IEA PVPS, *National Survey Report of PV Power Applications in Italy 2024*). La curva precedente sommava a prezzi €/kWp già "tutto compreso" altri 2.300 € di costi fissi, contando due volte inverter e pratiche: era più alta del 31% a 3 kWp e del 33% a 6 kWp. La fascia bassa/alta è restituita all'utente (`capex_banda_eur`) come riferimento per valutare un preventivo.
+
+**Batteria residenziale**: 1.200 € fissi (sovrapprezzo dell'inverter ibrido, BMS, posa) + 550 €/kWh, cioè circa 790 €/kWh a 5 kWh e 670 €/kWh a 10 kWh.
+
 ### 6.2 OPEX
 
 `OperatingCost` (`engine/economics.py:101-149`):
@@ -391,9 +407,16 @@ I kilowattora prodotti, autoconsumati ed esportati hanno senso solo se tradotti 
 - **Sostituzione inverter** all'anno `inverter_replacement_year` (default 12)
 - **Sostituzione batteria** agli anni elencati in `battery_replacement_years`, prezzo `battery_replacement_cost_eur_kWh` (default `350 €/kWh`, ~60 % del prezzo iniziale dell'epoca)
 
+**Residenziale.** Manutenzione 15 €/kWp all'anno (+2%/anno) invece dell'1% del costo: la manutenzione non scende insieme al prezzo dei pannelli (riferimento: 13-24 €/kW/anno osservati nello studio ARERA/GSE per il FER-X). Una sostituzione dell'inverter all'anno 12 da 1.000 € + 100 €/kWp (vita utile tipica 10-15 anni, costo di mercato 1.000-2.500 €): fino a novembre 2026 non era considerata. Sostituzione della batteria a 450 €/kWh quando la capacità scende all'80%.
+
 ### 6.3 Parametri finanziari
 
-`FinancialParameters` (`engine/economics.py:152-189`): discount rate WACC (default 5 %), energy price escalation (default 2.5 %/anno), orizzonte (default 25 anni). Per investimento finanziato: `financing_equity_fraction`, `loan_interest_rate`, `loan_duration_years`. La rata annua è una rendita standard `PMT = P · r(1+r)ⁿ / ((1+r)ⁿ−1)` (`engine/economics.py:338-350`).
+`FinancialParameters` (`engine/economics.py:152-189`): discount rate WACC (default 5 %), energy price escalation (default 2.5 %/anno), orizzonte (default 25 anni). Il campo `export_price_escalation` permette una rivalutazione diversa per il prezzo dell'energia **ceduta**; se non impostato vale come l'acquisto (comportamento usato per le scuole).
+
+**Residenziale.**
+- Energia acquistata: 0,25 €/kWh, +2,5%/anno. È un valore di lungo periodo per la sola parte variabile della bolletta (energia, oneri variabili, accise, IVA), inferiore alla parte variabile osservata nel 2026.
+- Energia ceduta: ritiro dedicato GSE a **0,06 €/kWh**, +1,5%/anno. Il prezzo minimo garantito per il fotovoltaico nel 2026 è 0,0475 €/kWh e viene aggiornato ogni anno con l'inflazione; il prezzo di mercato nelle ore di sole è più alto ma tende a scendere con la diffusione del fotovoltaico. Fino a novembre 2026 il motore usava 0,08 €/kWh ("scambio sul posto") rivalutato del 2,5%/anno: già la sola rivalutazione rendeva l'NPV ottimista di 400-1.400 € a seconda della taglia (caso Borzano).
+- Tasso di sconto 5% nominale: circa il rendimento netto di un BTP decennale (4,35% lordo a novembre 2026, ≈3,8% netto) più un piccolo premio per il rischio dell'investimento. Il report completo mostra l'NPV anche al 3% e al 4% (`ScenarioOut.npv_per_tasso`). Per investimento finanziato: `financing_equity_fraction`, `loan_interest_rate`, `loan_duration_years`. La rata annua è una rendita standard `PMT = P · r(1+r)ⁿ / ((1+r)ⁿ−1)` (`engine/economics.py:338-350`).
 
 ### 6.4 Incentivi italiani modellati
 
@@ -401,7 +424,7 @@ I kilowattora prodotti, autoconsumati ed esportati hanno senso solo se tradotti 
 
 | Incentivo | Norma | Cosa fa | Quando |
 |---|---|---|---|
-| **Detrazione fiscale IRPEF/IRES** | L. 449/1997 + proroghe | % della CAPEX detratta dalle imposte, spalmata su N anni (default 50 % su 10 anni per residenziale) | Annuale per `detrazione_spread_years` |
+| **Detrazione fiscale IRPEF/IRES** | Art. 16-bis TUIR; aliquote 2026 dalla L. 199/2025 | % della CAPEX detratta dalle imposte, spalmata su N anni. Residenziale: 50 % sull'abitazione principale, 36 % sugli altri immobili, in 10 anni, tetto 96.000 €. Se l'utente dichiara l'IRPEF annua, ogni quota è limitata all'imposta di quell'anno (capienza), e il calcolo usa la detrazione effettiva | Annuale per `detrazione_spread_years` |
 | **Ammortamento accelerato** | DPR 917/1986 TUIR | Capex ammortizzato contro reddito imponibile (corporate). Scudo fiscale = `CAPEX · aliquota · IRES%` annuo | Per `1/aliquota` anni (default ~11) |
 | **Transizione 5.0** | DM 2024 | Credito d'imposta su investimenti ESG (default 0 — va abilitato esplicitamente) | Lump sum in anno 1 |
 | **CER (Comunità Energetica Rinnovabile)** | L. 234/2021 + DM 07/12/2023 | GSE paga `~0.11 €/kWh` su energia condivisa | Annuale per tutta la vita |
@@ -419,7 +442,9 @@ net_cf = energy_saving + export_revenue + cer_incentive + tax_benefit
         − om_cost − replacement_cost − loan_payment
 ```
 
-dove `energy_saving` e `export_revenue` sono **escalati** dell'`energy_price_escalation` rispetto all'anno 1 (`engine/economics.py:815-817`).
+dove `energy_saving` è **escalato** dell'`energy_price_escalation` rispetto all'anno 1 ed `export_revenue` dell'`export_price_escalation` (se impostato; altrimenti dello stesso tasso).
+
+**Rientro e NPV.** Il payback conta gli euro senza attualizzarli; l'NPV li attualizza al tasso di sconto. Un impianto può quindi recuperare la spesa in 10-12 anni e avere comunque NPV negativo: rende, ma meno del 5% annuo. Il sito lo spiega esplicitamente quando succede.
 
 - **NPV** = Σ DCF − equity outflow al t=0 (`engine/economics.py:887`). DCF = net_cf / (1+r)^anno.
 - **IRR** risolto numericamente con Newton-Raphson e fallback bisezione (`engine/economics.py:407-459`). Restituisce −1.0 (= "non definito") se non esiste cambio di segno.
@@ -566,6 +591,19 @@ L'output (`school/incentives_school.py:113-116`): CAPEX netta dopo IVA e contrib
 
 ---
 
+## 7-bis. Segmento residenziale (stima casa)
+
+L'endpoint `POST /estimate/casa` (`api/routers/estimate_casa.py`) produce la stima preliminare per una famiglia. Usa lo stesso motore fisico ed economico delle scuole, con assunzioni proprie.
+
+- **Consumo.** Dalla bolletta annua, se c'è (banda ±15%); altrimenti da un proxy su persone, superficie, auto elettrica, condizionatore, acqua calda e riscaldamento elettrici (banda ±30-45%). Il profilo orario distingue una casa vuota di giorno da una spesso occupata.
+- **Tetto.** Senza dati del tetto: area ≈ 0,5 × superficie abitabile, inclinazione 30°, orientamento scelto dall'utente (sud, sud-est/sud-ovest, est, ovest, nord, non so; "non so" = sud-ovest, prudente). Est e ovest sono distinti perché rendono in modo diverso a seconda del sito (ad Albinea l'est circa il 2% in più, per le colline a sud-ovest).
+- **Tetto da Google Solar (opzionale, Livello 2).** Con le coordinate dell'edificio e la conferma dell'utente, si usano falde, pendenze e orientamenti rilevati. Ogni falda è valutata simulando 1 kWp sulla sua geometria; si usano quelle che rendono almeno il 70% della migliore (scelta nostra), si riempiono a partire dalla migliore e ogni falda è simulata con il proprio orientamento. Negli appartamenti si usano solo pendenza e orientamento, mai l'area (il tetto è condiviso). Google non fornisce mappe d'ombra agli account europei.
+- **Dimensionamento.** Tra tre-quattro taglie candidate si sceglie quella con NPV migliore tra quelle che producono al massimo il 150% del consumo annuo: oltre, l'impianto vivrebbe soprattutto di energia ceduta. Il limite è una scelta nostra, motivata ma non calibrata.
+- **Verdetto.** Ottimo (rientro ≤ 8 anni e NPV > 0), buono (≤ 12), accettabile (< 20), altrimenti negativo; un gradino in meno se l'impianto copre meno del 35% del consumo; "marginale" se l'NPV è positivo ma sotto il 10% del costo, che corrisponde a un rendimento interno di circa il 6%, solo un punto sopra il tasso di sconto. Le soglie sono scelte nostre e sono dichiarate come tali.
+- **Ombre vicine (Livello 2, in sviluppo).** L'utente risponde a domande osservabili (ostacoli più alti del tetto, da che lato, per quanto tempo) che diventano una perdita annua: 3% senza ostacoli, 6% con ostacoli a est o ovest per qualche ora, 12% a sud per qualche ora, 20% per buona parte del giorno, con fasce di incertezza. I valori sono una nostra stima tarata sul test affiancato NREL/PVEL su tetti residenziali; con ombra il report consiglia ottimizzatori o microinverter, che in quel test hanno recuperato circa il 25-35% della perdita.
+
+---
+
 ## 8. Validazione e calibrazione
 
 Un modello fisico-economico, per quanto rigoroso nella sua costruzione, deve essere verificato contro casi reali. Meridiana usa Borzano di Albinea — un edificio scolastico in provincia di Reggio Emilia, a 44.601°N e 10.636°E — come caso di riferimento per il regression testing. Ogni refactor del motore, ogni aggiunta di funzionalità, ogni modifica architetturale deve produrre risultati identici al millesimo sul caso Borzano: questa è la garanzia che il comportamento del motore resta stabile tra versioni. Oltre al caso Borzano, una suite di test automatici copre i passaggi critici — bilancio energetico, conservazione dell'energia, edge case del calendario scolastico, retrocompatibilità multi-footprint. I test che falliscono bloccano il commit.
@@ -574,11 +612,11 @@ Un modello fisico-economico, per quanto rigoroso nella sua costruzione, deve ess
 
 - **Borzano di Albinea (RE)**, 44.601° N, 10.636° E, elevazione 173 m
 - Impianto 100 kWp, tilt 15°, azimuth sud
-- Produzione di riferimento simulata: **131 763 kWh/anno** (motore standalone)
+- Produzione di riferimento simulata: **131 938 kWh/anno** (motore standalone, `open_rack`). Era 131 763 fino al 20/11/2026: la differenza (+0,13%) viene tutta dalla correzione dell'istante del sole (§2.1); con l'orario precedente il valore storico si riproduce esatto.
 
 Questo è il "caso oro" della retrocompatibilità: ogni cambiamento al codice del motore deve dare lo stesso valore al millesimo, salvo refactor esplicitamente motivati. Un test pytest dedicato (`tests/test_multi_footprint.py` per il caso 1-footprint == single-building) presidia questa invariante.
 
-**Test suite.** 18 test pytest verdi al 13 maggio 2026, tra cui:
+**Test suite.** Circa 500 test pytest verdi al 20 novembre 2026, tra cui:
 
 - `test_multi_footprint.py` — multi-edificio = single-building per N=1
 - `test_scenarios_level1.py` — confronto scenari smoke test
@@ -586,12 +624,9 @@ Questo è il "caso oro" della retrocompatibilità: ogni cambiamento al codice de
 
 Lanciabili con `pytest tests/`.
 
-**Discrepanza nota — il "−10 %".** Il numero di riferimento del motore standalone (131 763 kWh/anno) e il valore conservativo pubblicato nei materiali pubblici Meridiana (banner sito ~120 000 kWh/anno) differiscono del ~9 %. La differenza è ancora **non riconciliata in produzione**:
+**Nota sul banner del sito.** Il valore di circa 120 000 kWh/anno mostrato in un banner della homepage non è calcolato dal motore e non va letto come risultato di Meridiana: è in corso di sostituzione.
 
-- Il motore standalone è stato calibrato senza pvlib e con coefficienti Perez/Faiman al vincolo di letteratura.
-- Il valore pubblicato è prudenziale; usa probabilmente assunzioni più stringenti su `shading_near`, `availability` o copertura.
-- Quando pvlib girerà in produzione su Railway, il numero del motore potrebbe scendere a ~125 000 kWh/anno (il percorso pvlib usa modelli leggermente più conservativi su clipping e inverter low-load).
-- Da risolvere prima del lancio commerciale settembre 2026 (registrato in `CLAUDE.md` repo backend, sezione "Problemi noti").
+**Altri casi di confronto (residenziale).** Le correzioni del 20/11/2026 sono state verificate su sei case tipo ad Albinea (consumi da 1.435 a 6.000 kWh/anno, tetti sud ed est/ovest, impianti da 1,5 a 6 kWp), confrontando i risultati prima e dopo ogni modifica. La stima dei consumi senza bolletta è però calibrata su un solo caso reale (§9).
 
 ---
 
@@ -609,7 +644,7 @@ Pubblicate **integralmente** perché siano l'argomento di chi vuole contestare i
 
 ### Solare
 
-- **Shading 3D non modellato.** L'orizzonte usato è solo quello geografico di PVGIS. Ostacoli costruiti (palazzi, alberi, ciminiere) entrano solo come perdita media `shading_near`.
+- **Shading 3D non modellato.** L'orizzonte geografico è già nei dati PVGIS (§1). Ostacoli costruiti (palazzi, alberi, ciminiere) entrano solo come perdita media `shading_near`, o come classe dichiarata nel residenziale di Livello 2 (§7-bis).
 - **`usable_fraction = 0.70` default** generico (`engine/solar.py:83`): nessun'analisi della geometria reale del tetto.
 - **`200 W/m²` densità modulo** hardcoded (`engine/solar.py:92`) — corretto per moduli mainstream 2024, sottostima moduli alta efficienza (>23 %).
 - **Bias pvlib vs standalone.** I due percorsi divergono di 2–3 % annuali su casi estremi (alte latitudini, alti tilt). Il default è pvlib se installato.
@@ -626,7 +661,9 @@ Pubblicate **integralmente** perché siano l'argomento di chi vuole contestare i
 ### Economico
 
 - **Prezzi vettori escalation uniforme.** Il modello non distingue tra "gas che sale del 5 %" e "elettricità ferma": ciascun vettore ha la sua escalation costante. La volatilità storica reale (es. 2022) non è catturabile con un singolo tasso.
-- **Tariffa export hardcoded.** Il modello assume `ritiro_dedicato` con tariffa fissa configurabile; lo Scambio sul Posto (chiuso per nuovi impianti dal 2024) non è modellato.
+- **Tariffa export fissa.** Il residenziale usa il ritiro dedicato a 0,06 €/kWh rivalutato dell'1,5%/anno; il prezzo reale varia ora per ora ed è soggetto alle regole ARERA. Lo Scambio sul Posto non è più attivabile per i nuovi impianti (dal 29/05/2025).
+- **Costi residenziali da indagini, non da preventivi.** La curva di costo (§6.1) viene da dati GSE/IEA e listini; non è ancora confrontata con un campione di preventivi reali. La verifica dei preventivi della Livello 2 servirà anche a questo.
+- **Consumi residenziali stimati su un caso.** Il proxy dei consumi senza bolletta e il profilo orario "famiglia fuori casa di giorno" sono calibrati su una sola bolletta reale (Borzano, 4 persone, tutto gas). Lo scenario pompa di calore senza dati del gas usa un benchmark per m² che su quel caso sovrastimava il consumo di circa un terzo.
 - **Incentivi rappresentano lo "stato attuale".** Norme italiane cambiano spesso (Superbonus 110/90/65/50, Transizione 5.0 in evoluzione). Il modello fotografa lo stato al momento della stima — non garantisce che gli incentivi saranno ancora disponibili o invariati al momento dell'effettiva realizzazione.
 - **CER fortemente semplificato.** Modellato come `tariffa fissa · frazione condivisa · produzione`. Non simula la dinamica oraria di una comunità reale (membri produttori vs consumatori, scambi GSE).
 - **Score 0–10 arbitrario.** Le soglie e i pesi sono scelte editoriali, non derivate da analisi statistica. Servono come tassonomia, non come misura assoluta.

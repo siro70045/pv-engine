@@ -4,15 +4,16 @@ residential/incentives.py
 Modello della detrazione IRPEF per impianti FV residenziali.
 
 Normativa di riferimento: spese sostenute nel 2026.
-  - Art. 16-bis TUIR (DPR 917/1986), come prorogato dalla Legge di Bilancio
-    2025 (L. 207/2024, art. 1, cc. 54-56).
+  - Art. 16-bis TUIR (DPR 917/1986). Aliquote 2026 (50 % / 36 %) confermate dalla
+    Legge di Bilancio 2026 (L. 199/2025); la L. 207/2024 prevedeva il 36 % / 30 %
+    dal 2026. Per il 2027 il DDL di Bilancio (ott 2026) propone la conferma.
   - Tetto di spesa: 96.000 € per unità immobiliare (invariato dal DL 83/2012).
   - Recupero in 10 quote annuali di pari importo (NON sconto immediato).
   - Sconto in fattura e cessione del credito aboliti per le nuove richieste
     dal DL 39/2024 (art. 1). Non applicabili agli impianti FV residenziali
     ordinari dal 17/02/2023 in poi.
 
-Aliquote 2026 (L. 207/2024):
+Aliquote 2026 (L. 199/2025):
   - 50 % se abitazione PRINCIPALE (residenza anagrafica del proprietario
     o del titolare di altro diritto reale di godimento — art. 16-bis c. 1)
   - 36 % negli altri casi (seconda casa, locata, nuda proprietà con altro
@@ -82,7 +83,7 @@ from typing import Optional
 # Tetto di spesa per unità immobiliare [€] — art. 16-bis TUIR, invariato dal 2012
 TETTO_SPESA_EUR: float = 96_000.0
 
-# Aliquote — L. 207/2024 per spese 2026
+# Aliquote — spese 2026 (L. 199/2025, Legge di Bilancio 2026)
 ALIQUOTA_PRINCIPALE_PCT: float = 50.0
 ALIQUOTA_ALTRI_CASI_PCT: float = 36.0
 
@@ -173,7 +174,7 @@ def calc_irpef_deduction(
 
     Notes
     -----
-    Normativa: art. 16-bis TUIR (DPR 917/1986), aliquote 2026 da L. 207/2024.
+    Normativa: art. 16-bis TUIR (DPR 917/1986), aliquote 2026 da L. 199/2025.
     La quota annua non recuperata per insufficiente IRPEF è definitivamente
     persa: non è rimborsabile né riportabile all'anno successivo.
     """
@@ -209,7 +210,7 @@ def calc_irpef_deduction(
     nota = (
         f"Detrazione IRPEF {aliquota:.0f}% ({tipo_immobile}) su spesa "
         f"agevolabile €{spesa_agevolabile:,.0f} (tetto 96.000 €/unità, "
-        f"art. 16-bis TUIR — L. 207/2024): totale €{detrazione_totale:,.0f} "
+        f"art. 16-bis TUIR — L. 199/2025): totale €{detrazione_totale:,.0f} "
         f"in {QUOTE_ANNUALI} quote annuali da €{quota_annua:,.0f}. "
         "Recuperata in dichiarazione dei redditi (no sconto in fattura). "
     )

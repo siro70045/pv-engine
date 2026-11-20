@@ -488,19 +488,32 @@ class TestBeneficioBreakdown:
 # ── 15. Costi fissi residenziali ─────────────────────────────────────────────
 
 class TestCostiFissi:
-    def test_capex_min_1500_rispetto_a_prima(self, client):
-        """1,5 kWp deve costare almeno €5.000 (vecchio €4.000 + €1.500 fissi)."""
-        body = client.post("/estimate/casa", json={
-            **_BASE_BOLLETTA,
-            "potenza_kwp": 1.5,
-            "floor_area_m2": 200.0,   # roof large enough for 1.5 kWp
-        }).json()
-        assert body["capex_indicativo_eur"] >= 5_000
+    def test_capex_curva_calibrata(self, client):
+        """Curva 20 nov 2026: 2.500 € + 1.150 €/kWp → 1,5 kWp = 4.200 €, 6 kWp = 9.400 €."""
+        for kwp, atteso in ((1.5, 4_200), (6.0, 9_400)):
+            body = client.post("/estimate/casa", json={
+                **_BASE_BOLLETTA, "potenza_kwp": kwp, "floor_area_m2": 200.0,
+            }).json()
+            assert body["capex_indicativo_eur"] == atteso, (kwp, body["capex_indicativo_eur"])
 
-    def test_assunzioni_contiene_costi_fissi(self, client):
+    def test_costo_per_kwp_scende_con_la_taglia(self, client):
+        per_kwp = []
+        for kwp in (1.5, 3.0, 6.0):
+            body = client.post("/estimate/casa", json={
+                **_BASE_BOLLETTA, "potenza_kwp": kwp, "floor_area_m2": 200.0,
+            }).json()
+            per_kwp.append(body["capex_indicativo_eur"] / kwp)
+        assert per_kwp[0] > per_kwp[1] > per_kwp[2], per_kwp
+
+    def test_banda_capex_contiene_centrale(self, client):
+        body = client.post("/estimate/casa", json={**_BASE_BOLLETTA, "potenza_kwp": 3.0}).json()
+        b = body["capex_banda_eur"]
+        assert b["low"] < body["capex_indicativo_eur"] < b["high"]
+
+    def test_assunzioni_parte_fissa_senza_cila(self, client):
         body = client.post("/estimate/casa", json=_BASE_PROXY).json()
         testo = " ".join(body["assunzioni"]).lower()
-        assert "1.500" in testo or "fissi" in testo
+        assert "parte fissa" in testo and "cila" not in testo
 
 
 # ── 16. Avvertenze fragilità ─────────────────────────────────────────────────
@@ -514,7 +527,37 @@ class TestAvvertenzeFragilita:
     def test_avvertenza_prezzo_export(self, client):
         body = client.post("/estimate/casa", json=_BASE_PROXY).json()
         testo = " ".join(body["assunzioni"])
-        assert "0,08" in testo or "cessione" in testo.lower()
+        assert "0,06" in testo and "ritiro dedicato" in testo.lower()
+        assert "scambio sul posto" not in testo.lower() or "non è" in testo.lower()
+
+    def test_avvertenza_inverter(self, client):
+        body = client.post("/estimate/casa", json=_BASE_PROXY).json()
+        testo = " ".join(body["assunzioni"])
+        assert "inverter" in testo.lower() and "anno 12" in testo
+
+
+# ── 16b. Correzioni audit (20 nov 2026) ──────────────────────────────────────
+
+class TestCorrezioniAudit:
+    def test_est_produce_meno_di_ovest(self, client):
+        prod = {}
+        for ori in ("est", "ovest"):
+            body = client.post("/estimate/casa", json={**_BASE_PROXY, "orientamento": ori, "potenza_kwp": 3.0}).json()
+            prod[ori] = body["produzione_annua_kwh"]
+        assert prod["est"] < prod["ovest"], prod
+
+    def test_est_o_ovest_legacy_uguale_a_est(self, client):
+        prod = {}
+        for ori in ("est", "est_o_ovest"):
+            body = client.post("/estimate/casa", json={**_BASE_PROXY, "orientamento": ori, "potenza_kwp": 3.0}).json()
+            prod[ori] = body["produzione_annua_kwh"]
+        assert prod["est"] == prod["est_o_ovest"], prod
+
+    def test_capienza_irpef_riduce_npv(self, client):
+        base = {**_BASE_PROXY, "potenza_kwp": 3.0}
+        piena = client.post("/estimate/casa", json=base).json()
+        bassa = client.post("/estimate/casa", json={**base, "irpef_annua_stimata": 100}).json()
+        assert bassa["senza_batteria"]["npv_eur"] < piena["senza_batteria"]["npv_eur"] - 500
 
 
 # ── 17. Borzano: autosufficienza bassa annotata nel verdetto ─────────────────
@@ -611,7 +654,10 @@ class TestAutoSizingNPV:
             tc = body["taglie_confronto"]
             tutti_negativi = all(t["npv_eur"] <= 0 for t in tc)
             if tutti_negativi and body["auto_dimensionato"]:
-                assert "Nessuna taglia" in vp["testo"] or "nessuna taglia" in vp["testo"]
+                # Two legitimate messages: no cap-eligible size pays back, or even the
+                # smallest size exceeds the 150% cap (forza_minima branch).
+                testo = vp["testo"].lower()
+                assert "nessuna" in testo or "anche il più piccolo impianto" in testo
 
     def test_user_kwp_non_soggetto_a_npv_selection(self, client):
         """Se l'utente specifica potenza_kwp, kwp_ipotizzato = quello specificato
@@ -1098,3 +1144,272 @@ class TestScenariAlternativi:
         for campo in ("consumo_kwh_annuo", "kwp_ipotizzato", "produzione_annua_kwh",
                        "verdetto_pv", "senza_batteria", "taglie_confronto"):
             assert campo in body_old
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Google Solar API integration (FASE 3 — tetto_rilevato)
+# fetch_roof_data patched in the router module; no live HTTP calls.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from residential.roof_google import RoofData, RoofSegment  # noqa: E402  (below fixtures)
+
+
+def _mock_roof_borzano() -> RoofData:
+    """Synthetic RoofData matching Borzano probe results (2026-09-28)."""
+    return RoofData(
+        segments=[
+            RoofSegment(
+                pitch_deg=22.6, azimuth_deg=166.8, area_m2=27.1, ground_area_m2=25.1,
+                sunshine_quantiles=[899.3, 1000.0, 1096.4, 1150.0, 1202.8, 1257.0,
+                                    1304.8, 1347.8, 1385.0, 1413.0, 1478.5],
+            ),
+            RoofSegment(
+                pitch_deg=21.9, azimuth_deg=18.3, area_m2=25.1, ground_area_m2=23.3,
+                sunshine_quantiles=[715.6, 850.0, 974.2, 1020.0, 1027.5, 1065.5,
+                                    1082.6, 1097.0, 1105.6, 1238.3, 1418.1],
+            ),
+        ],
+        imagery_quality="MEDIUM",
+        imagery_year=2021,
+        imagery_date_str="2021-08-09",
+        lat_rounded=44.601,
+        lon_rounded=10.636,
+    )
+
+
+@pytest.fixture()
+def google_client():
+    """Function-scoped client with both TMY and Google Solar mocked."""
+    import api.routers.estimate_casa as est_mod
+    from api.utils.limiter import limiter
+    from api.main import app
+
+    orig_tmy = est_mod.get_cached_tmy
+    orig_roof = est_mod.fetch_roof_data
+    orig_enabled = limiter.enabled
+
+    est_mod.get_cached_tmy = lambda lat, lon: (TMY, True)
+    est_mod.fetch_roof_data = lambda lat, lon: _mock_roof_borzano()
+    limiter.enabled = False
+
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        est_mod.get_cached_tmy = orig_tmy
+        est_mod.fetch_roof_data = orig_roof
+        limiter.enabled = orig_enabled
+
+
+@pytest.fixture()
+def no_key_client():
+    """Function-scoped client where Google Solar returns None (key absent)."""
+    import api.routers.estimate_casa as est_mod
+    from api.utils.limiter import limiter
+    from api.main import app
+
+    orig_tmy = est_mod.get_cached_tmy
+    orig_roof = est_mod.fetch_roof_data
+    orig_enabled = limiter.enabled
+
+    est_mod.get_cached_tmy = lambda lat, lon: (TMY, True)
+    est_mod.fetch_roof_data = lambda lat, lon: None   # key absent / network error
+    limiter.enabled = False
+
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        est_mod.get_cached_tmy = orig_tmy
+        est_mod.fetch_roof_data = orig_roof
+        limiter.enabled = orig_enabled
+
+
+_BORZANO_LATLON = {
+    **_BASE_BOLLETTA,
+    "comune": "Albinea",
+    "provincia": "RE",
+    "lat": 44.601,
+    "lon": 10.636,
+}
+
+
+class TestSenzaLatLon:
+    """Senza lat/lon il flusso è invariato: tetto_rilevato è null."""
+
+    def test_tetto_rilevato_assente(self, client):
+        body = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
+        assert body.get("tetto_rilevato") is None
+
+    def test_200_invariato(self, client):
+        r = client.post("/estimate/casa", json=_BASE_BOLLETTA)
+        assert r.status_code == 200
+
+
+class TestConLatLonSenzaConferma:
+    """lat/lon presenti, conferma_tetto=False: falde esposte ma NON usate."""
+
+    def test_tetto_rilevato_presente(self, google_client):
+        body = google_client.post("/estimate/casa", json=_BORZANO_LATLON).json()
+        assert body["tetto_rilevato"] is not None
+
+    def test_usato_nel_calcolo_false(self, google_client):
+        body = google_client.post("/estimate/casa", json=_BORZANO_LATLON).json()
+        assert body["tetto_rilevato"]["usato_nel_calcolo"] is False
+
+    def test_falde_count(self, google_client):
+        body = google_client.post("/estimate/casa", json=_BORZANO_LATLON).json()
+        assert len(body["tetto_rilevato"]["falde"]) == 2
+
+    def test_imagery_quality_presente(self, google_client):
+        body = google_client.post("/estimate/casa", json=_BORZANO_LATLON).json()
+        assert body["tetto_rilevato"]["imagery_quality"] == "MEDIUM"
+
+    def test_una_falda_migliore(self, google_client):
+        body = google_client.post("/estimate/casa", json=_BORZANO_LATLON).json()
+        migliori = [f for f in body["tetto_rilevato"]["falde"] if f["migliore"]]
+        assert len(migliori) == 1
+
+    def test_assunzioni_non_contengono_google(self, google_client):
+        """Senza conferma, le assunzioni non fanno riferimento a Google Solar."""
+        body = google_client.post("/estimate/casa", json=_BORZANO_LATLON).json()
+        joined = " ".join(body["assunzioni"]).lower()
+        assert "google solar" not in joined
+
+    def test_200(self, google_client):
+        r = google_client.post("/estimate/casa", json=_BORZANO_LATLON)
+        assert r.status_code == 200
+
+
+class TestConLatLonEConferma:
+    """conferma_tetto=True: geometria Google usata nel calcolo."""
+
+    _REQ = {**_BORZANO_LATLON, "conferma_tetto": True, "tipo_abitazione": "casa"}
+
+    def test_usato_nel_calcolo_true(self, google_client):
+        body = google_client.post("/estimate/casa", json=self._REQ).json()
+        assert body["tetto_rilevato"]["usato_nel_calcolo"] is True
+
+    def test_assunzioni_contengono_google(self, google_client):
+        body = google_client.post("/estimate/casa", json=self._REQ).json()
+        joined = " ".join(body["assunzioni"])
+        assert "Google Solar" in joined
+
+    def test_assunzioni_contengono_anno_immagini(self, google_client):
+        body = google_client.post("/estimate/casa", json=self._REQ).json()
+        assert "2021" in " ".join(body["assunzioni"])
+
+    def test_assunzioni_contengono_ombreggiamento_non_modellato(self, google_client):
+        body = google_client.post("/estimate/casa", json=self._REQ).json()
+        joined = " ".join(body["assunzioni"]).lower()
+        assert "ombreggiamento" in joined
+
+    def test_200(self, google_client):
+        r = google_client.post("/estimate/casa", json=self._REQ)
+        assert r.status_code == 200
+
+    def test_produzione_positiva(self, google_client):
+        body = google_client.post("/estimate/casa", json=self._REQ).json()
+        assert body["produzione_annua_kwh"] > 0
+
+    def test_verdetto_presente(self, google_client):
+        body = google_client.post("/estimate/casa", json=self._REQ).json()
+        assert body["verdetto_pv"]["etichetta"] in (
+            "ottimo", "buono", "accettabile", "marginale", "negativo"
+        )
+
+
+class TestAppartamento:
+    """Per un appartamento, l'area NON viene sostituita con quella Google."""
+
+    _REQ = {
+        **_BORZANO_LATLON,
+        "conferma_tetto": True,
+        "tipo_abitazione": "appartamento",
+    }
+
+    def test_usato_nel_calcolo_true(self, google_client):
+        body = google_client.post("/estimate/casa", json=self._REQ).json()
+        assert body["tetto_rilevato"]["usato_nel_calcolo"] is True
+
+    def test_assunzioni_menziona_condominio(self, google_client):
+        body = google_client.post("/estimate/casa", json=self._REQ).json()
+        joined = " ".join(body["assunzioni"]).lower()
+        assert "condominio" in joined or "condiviso" in joined
+
+    def test_200(self, google_client):
+        r = google_client.post("/estimate/casa", json=self._REQ)
+        assert r.status_code == 200
+
+
+class TestChiaveAssente:
+    """Con chiave assente (fetch_roof_data→None) il flusso continua senza errori."""
+
+    def test_200_senza_chiave(self, no_key_client):
+        r = no_key_client.post("/estimate/casa", json=_BORZANO_LATLON)
+        assert r.status_code == 200
+
+    def test_tetto_rilevato_null_senza_chiave(self, no_key_client):
+        body = no_key_client.post("/estimate/casa", json=_BORZANO_LATLON).json()
+        assert body.get("tetto_rilevato") is None
+
+    def test_produzione_positiva_senza_chiave(self, no_key_client):
+        body = no_key_client.post("/estimate/casa", json=_BORZANO_LATLON).json()
+        assert body["produzione_annua_kwh"] > 0
+
+
+# ── Multi-falda (audit §6.2): each used face simulated with its own orientation ──
+
+def _mock_roof_est_ovest() -> RoofData:
+    """Gable roof: two equal faces, east and west, 30 m² each (≈4 kWp each)."""
+    return RoofData(
+        segments=[
+            RoofSegment(pitch_deg=25.0, azimuth_deg=90.0, area_m2=30.0, ground_area_m2=27.2,
+                        sunshine_quantiles=[]),
+            RoofSegment(pitch_deg=25.0, azimuth_deg=270.0, area_m2=30.0, ground_area_m2=27.2,
+                        sunshine_quantiles=[]),
+        ],
+        imagery_quality="HIGH", imagery_year=2025, imagery_date_str="2025-05-01",
+        lat_rounded=44.6, lon_rounded=10.6,
+    )
+
+
+@pytest.fixture()
+def gable_client():
+    import api.routers.estimate_casa as est_mod
+    from api.utils.limiter import limiter
+    from api.main import app
+
+    orig_tmy, orig_roof, orig_enabled = est_mod.get_cached_tmy, est_mod.fetch_roof_data, limiter.enabled
+    est_mod.get_cached_tmy = lambda lat, lon: (TMY, True)
+    est_mod.fetch_roof_data = lambda lat, lon: _mock_roof_est_ovest()
+    limiter.enabled = False
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        est_mod.get_cached_tmy, est_mod.fetch_roof_data, limiter.enabled = orig_tmy, orig_roof, orig_enabled
+
+
+class TestMultiFalda:
+    _REQ = {**_BORZANO_LATLON, "conferma_tetto": True, "tipo_abitazione": "casa",
+            "bolletta_kwh": 6000.0, "potenza_kwp": 6.0}
+
+    def test_entrambe_le_falde_usate(self, gable_client):
+        body = gable_client.post("/estimate/casa", json=self._REQ).json()
+        falde = body["tetto_rilevato"]["falde"]
+        assert all(f["usata"] for f in falde)
+        assert sum(f["migliore"] for f in falde) == 1
+
+    def test_produzione_tra_est_e_ovest_puri(self, gable_client, client):
+        """6 kWp split on E+W must produce between all-east and all-west (same kWp)."""
+        multi = gable_client.post("/estimate/casa", json=self._REQ).json()["produzione_annua_kwh"]
+        base = {k: v for k, v in self._REQ.items() if k not in ("lat", "lon", "conferma_tetto", "tipo_abitazione")}
+        est = client.post("/estimate/casa", json={**base, "orientamento": "est"}).json()["produzione_annua_kwh"]
+        ovest = client.post("/estimate/casa", json={**base, "orientamento": "ovest"}).json()["produzione_annua_kwh"]
+        # tilt differs (25° vs 30°) so allow a small tolerance around the E/W band
+        assert est * 0.97 <= multi <= ovest * 1.03, (est, multi, ovest)
+
+    def test_nota_falde_nelle_assunzioni(self, gable_client):
+        body = gable_client.post("/estimate/casa", json=self._REQ).json()
+        assert any(a.startswith("Falde usate:") for a in body["assunzioni"])

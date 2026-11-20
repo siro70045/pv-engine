@@ -4,7 +4,7 @@ Backend Python di Meridiana, piattaforma italiana di analisi tecno-economica del
 
 ## Stack
 
-Python 3.11+, `pvlib`, FastAPI, Pydantic v2, `shapely>=2.0` (poligoni regionali ISTAT). Streamlit (`app.py` + `app_school.py`) come prototipo dev interno, **NON prodotto finale**. Deploy Railway su https://pv-engine-production.up.railway.app. Dati: PVGIS-SARAH3 TMY, ENEA, calendario 21 regioni italiane, zone climatiche A-F, NTC 2018, poligoni amministrativi ISTAT (`school/data/regioni_istat.geojson`, ~131 KB semplificati).
+Python 3.11+ (pvlib NON installato: gira sempre il percorso solare standalone), FastAPI, Pydantic v2, `shapely>=2.0` (poligoni regionali ISTAT). Streamlit (`app.py` + `app_school.py`) come prototipo dev interno, **NON prodotto finale**. Deploy Railway su https://pv-engine-production.up.railway.app. Dati: PVGIS-SARAH2 TMY (endpoint v5_2; SARAH3 solo su PVGIS 5.3), ENEA, calendario 21 regioni italiane, zone climatiche A-F, NTC 2018, poligoni amministrativi ISTAT (`school/data/regioni_istat.geojson`, ~131 KB semplificati).
 
 ## Struttura
 
@@ -90,7 +90,7 @@ Stima pubblica con 5 input form: Comune, tipologia scuola (4 voci: elementare/me
 
 **DECISIONI DI MODELLO DA NON PERDERE** (`api/routers/estimate_casa.py`):
 
-- **Costo fisso residenziale €1.500** (ponteggio, inverter, CILA, collaudo) incluso nel CAPEX e NON proporzionale alla taglia. Senza questo, gli impianti piccoli (1.5-2 kWp) risultavano falsamente convenienti perché il modello di costo lineare sottostimava i costi fissi.
+- **Costo residenziale (ricalibrato 20 nov 2026)**: `api/utils/cost.py` — TOTALE = €2.500 + €1.150/kWp, IVA inclusa, chiavi in mano senza batteria (banda bassa 1.800+1.000, alta 3.200+1.450, esposta in `capex_banda_eur`). Fonti: indagine GSE per IEA PVPS NSR Italia 2024 (1,53 €/W IVA incl. < 10 kW), prezzario Regione Piemonte 2026 (inverter), tetti Reddito Energetico/CACER, comparatori come controllo. I vecchi scaglioni 2.100/1.800 €/kWp + €2.300 fissi contavano due volte inverter e pratiche (+31% a 3 kWp, +33% a 6 kWp). Il €/kWp scende con la taglia (fisso spalmato). CILA tolta: su edificio esistente senza vincoli è edilizia libera. ~~Vecchia nota:~~ costo fisso e NON proporzionale alla taglia. Senza questo, gli impianti piccoli (1.5-2 kWp) risultavano falsamente convenienti perché il modello di costo lineare sottostimava i costi fissi.
 
 - **Cap dimensionamento 150%**: la taglia consigliata non può produrre più del 150% del fabbisogno annuo stimato — oltre quella soglia l'impianto vende principalmente alla rete a 0,08 €/kWh (assunzione fragile). Tra le candidate nel cap si sceglie la taglia con NPV migliore. Se tutte le candidate superano il cap (casa piccola), si usa la taglia minima disponibile e si dichiara esplicitamente. Il criterio NPV/capex come alternativa al cap è stato valutato e scartato: non protegge dal sovradimensionamento, ottimizza solo il rendimento percentuale. `auto_scenarios` NON modificato: la logica vive nel wrapper casa (`estimate_casa.py`), il flusso scuole rimane intatto.
 
@@ -98,9 +98,9 @@ Stima pubblica con 5 input form: Comune, tipologia scuola (4 voci: elementare/me
 
 - **Verdetto declassato se autosufficienza < 35%**: un impianto che copre poco il fabbisogno dipende in larga misura dalla detrazione e dall'export — il verdetto lo segnala con ⚠.
 
-- **Etichetta "marginale"**: NPV/capex < 10% in 25 anni (≈ 0,4% nominale annuo, sotto l'inflazione). Inserita tra "accettabile" e "negativo". Esempio: nord 4.500 kWh → NPV €101 / capex €8.600 = 1,2% → "marginale" con testo esplicito sulla fragilità. La soglia si scala con il capex (10% di €8.600 = €860 per 3 kWp).
+- **Etichetta "marginale"**: NPV/capex < 10% in 25 anni. L'NPV è già al netto del 5% di sconto, quindi la soglia corrisponde a un IRR di circa il 6%: margine sottile sopra il rendimento richiesto (correzione audit §6.3; la vecchia nota "≈0,4% annuo" era sbagliata). Inserita tra "accettabile" e "negativo". Esempio: nord 4.500 kWh → NPV €101 / capex €8.600 = 1,2% → "marginale" con testo esplicito sulla fragilità. La soglia si scala con il capex (10% di €8.600 = €860 per 3 kWp).
 
-- **Orientamento tetto**: 5 valori Literal — `sud` (180°), `sud_est_sud_ovest` (200°), `est_o_ovest` (270°, una sola falda), `nord` (0°), `non_so` (225° SW, ipotesi prudente). Tilt 30° assunto e dichiarato nelle assunzioni. `est_o_ovest` modella UNA sola falda esposta a est O a ovest (non due falde); un impianto su due falde richiede il Livello 2. Con TMY reale: S=4046, SSW=4025, SW=3858, W=3274, N=2280 kWh per 3 kWp a Albinea 4.500 kWh/anno.
+- **Orientamento tetto**: valori Literal — `sud` (180°), `sud_est_sud_ovest` (200°), `est` (90°) e `ovest` (270°) separati dal 20 nov 2026 (est ≈ −4% rispetto a ovest), `est_o_ovest` storico = modellato come est (prudente), `nord` (0°), `non_so` (225° SW, ipotesi prudente). Tilt 30° assunto e dichiarato nelle assunzioni. `est_o_ovest` modella UNA sola falda esposta a est O a ovest (non due falde); un impianto su due falde richiede il Livello 2. Con TMY reale: S=4046, SSW=4025, SW=3858, W=3274, N=2280 kWh per 3 kWp a Albinea 4.500 kWh/anno.
 
 **FASE 2b+2c ✅ COMPLETATA (14 set 2026, commit `2272ae2`)** — Scenario elettrificazione:
 - `gas_smc_annui` (opz.): SCOP calcolato da TMY + tipo terminali; senza gas → benchmark 33 kWh/m² + nota indicativa
@@ -113,7 +113,25 @@ Stima pubblica con 5 input form: Comune, tipologia scuola (4 voci: elementare/me
 
 **DA FARE — Fase 2**: frontend `/casa/stima`. Prima del lancio, validare il proxy consumo con 2-3 casi reali diversi (una casa tutto-elettrico, una con EV) — finora validato solo su un caso a gas puro a basso consumo.
 
+## Correzioni audit applicate (20 nov 2026)
+
+Decise da Sirot dopo `docs/audit-matematico.md`. Tutte abbassano le stime residenziali; le scuole sono bit-identiche (nuovi parametri opzionali con default = comportamento precedente).
+
+- **Inverter**: una sostituzione all'anno 12, €1.000 + €100/kWp (`INVERTER_REPLACEMENT_*` in `residential/battery_scenario.py`). Prima: assente.
+- **Cessione in rete**: 0,06 €/kWh, regime ritiro dedicato GSE (lo scambio sul posto non è attivabile per impianti in esercizio dopo il 29/05/2025). Prezzo minimo garantito FV 2026: 0,0475 €/kWh. Prima: 0,08 "scambio sul posto".
+- **Escalation separata**: acquisto +2,5%/anno, cessione +1,5%/anno (come l'aggiornamento FOI del prezzo minimo garantito — opzione B scelta da Sirot). Nuovo campo `FinancialParameters.export_price_escalation` (None = uguale all'acquisto, comportamento storico).
+- **Capienza IRPEF nell'NPV**: il motore riceve la detrazione EFFETTIVA (prima la totale: bug, audit §5.2).
+- **Faiman `close_roof`**: U0 29 → 20 (PVsyst "semi-integrato"); circa −4,5% di produzione residenziale.
+- **Est e ovest separati** (vedi Orientamento).
+- **Falde Google**: ordinate per resa simulata di 1 kWp sulla loro inclinazione/orientamento (non più euristica coseno); usate quelle con resa ≥ 70% della migliore (`MIN_YIELD_RATIO`, scelta nostra); i kWp riempiono le falde dalla migliore e ogni falda è simulata col suo orientamento (`plan_segments`, `allocate_kwp`).
+- **SCOP percorso B** (elettrificazione senza dati gas): il benchmark 33 kWh_e/m² viene riportato a calore (× 2,75) e diviso per lo SCOP mostrato all'utente. ⚠ Il benchmark sovrastima già il consumo (−34% sul caso reale): con i termosifoni l'effetto si somma — da ricalibrare con casi reali.
+
+- **Batteria**: €1.200 fissi + €550/kWh (≈790 €/kWh a 5 kWh), sostituzione 450 €/kWh (era 380). **O&M**: 15 €/kWp/anno +2%/anno (era 1% del capex). Fonti nel report di ricerca del 20 nov 2026.
+- **Effetto netto** (6 casi tipo, Albinea): togliendo gli errori ottimisti E il costo gonfiato, NPV simili a prima ma payback più corti (es. famiglia 3.500 kWh, 2 kWp: +1.184 €, 8,8 anni); Borzano 1,5 kWp −96 € (negativo). Ora ogni numero ha una fonte. Aperto: tasso di sconto 5% (con 3% ≈ +1.000 € su Borzano).
+
 ## Problemi noti
+
+- 🟠 **Ombre — APERTO**: nessun modello d'ombra reale. Forfait 3% (`solar.py`), dataLayers Google non disponibili per account SEE, `usehorizon=1` richiesto a PVGIS ma il profilo d'orizzonte non arriva nel client (nota: il metadato della cache dice `use_horizon: true, horizon_db: DEM-calculated` — da verificare se PVGIS lo applica già dentro il TMY). Sirot: "troveremo un modo efficiente". Ottimista in collina/valle e con ostacoli vicini.
 
 - Discrepanza ~10% tra produzione Borzano 100 kWp simulata (131.763 kWh/anno motore standalone, no pvlib) vs valore dichiarato nei banner sito/PDF (~120.000 kWh/anno). Da risolvere prima del lancio settembre 2026 con pvlib in produzione Railway.
 - Variabile Railway `ENVIRONMENT=production` non ancora impostata (cosmetico).

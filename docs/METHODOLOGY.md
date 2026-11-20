@@ -25,7 +25,7 @@ Per dire se il fotovoltaico ha senso su un edificio bisogna prima sapere quanto 
 
 Le ore di un anno sono 8 760; ognuna di esse è accompagnata da un set di variabili: irraggiamento globale, diretto, diffuso, temperatura ambiente, vento. Senza questi dati nessun modello fisico di pannello fotovoltaico può funzionare. La scelta dei dati di partenza è la prima decisione critica del modello: tutto quello che segue è una conseguenza.
 
-**Fonte primaria.** Tutti i calcoli partono dai dati del [PVGIS](https://re.jrc.ec.europa.eu/pvg_tools/en/) (Photovoltaic Geographical Information System) sviluppato dal Joint Research Centre della Commissione Europea. Endpoint usato: `https://re.jrc.ec.europa.eu/api/v5_2/tmy` (`engine/pvgis_client.py:47`). PVGIS aggrega dati satellitari SARAH-3 ed ERA5 e produce un **Typical Meteorological Year (TMY)**: un anno orario sintetico costruito scegliendo, per ciascun mese, l'anno più rappresentativo della serie storica 2005–2020.
+**Fonte primaria.** Tutti i calcoli partono dai dati del [PVGIS](https://re.jrc.ec.europa.eu/pvg_tools/en/) (Photovoltaic Geographical Information System) sviluppato dal Joint Research Centre della Commissione Europea. Endpoint usato: `https://re.jrc.ec.europa.eu/api/v5_2/tmy` (`engine/pvgis_client.py:47`). PVGIS aggrega dati satellitari SARAH (l'endpoint v5_2 usato restituisce SARAH2; SARAH3 è su PVGIS 5.3) ed ERA5 e produce un **Typical Meteorological Year (TMY)**: un anno orario sintetico costruito scegliendo, per ciascun mese, l'anno più rappresentativo della serie storica 2005–2020.
 
 **Cosa scarichiamo.** Per ogni coppia (latitudine, longitudine) PVGIS restituisce 8 760 record orari con i seguenti campi (`engine/pvgis_client.py:62-77`):
 
@@ -49,7 +49,7 @@ PVGIS restituisce inoltre l'**orizzonte locale**: 36 valori di altezza apparente
 
 **Limiti tecnici del dato.**
 
-- **Risoluzione spaziale.** PVGIS produce TMY ricampionando griglia satellitare nominalmente ~0.1° (~11 km) sulle componenti SARAH-3. Microclimi inferiori a questa scala (foschia di valle ricorrente, isole urbane di calore, nebbie persistenti) **non sono catturati**.
+- **Risoluzione spaziale.** PVGIS produce TMY ricampionando griglia satellitare nominalmente ~0.1° (~11 km) sulle componenti SARAH2. Microclimi inferiori a questa scala (foschia di valle ricorrente, isole urbane di calore, nebbie persistenti) **non sono catturati**.
 - **TMY ≠ anno reale.** Il TMY è statistica, non meteo. Un singolo anno futuro sarà più scuro o più chiaro. Per studi di sensitività vera al rischio meteorologico servirebbe simulazione su 15+ anni reali — non implementata.
 - **Orizzonte topografico, non costruito.** L'orizzonte di PVGIS è il rilievo geografico, non gli edifici circostanti. Lo shading da palazzi vicini, alberi alti, ciminiere **non è modellato** automaticamente: va inserito manualmente come `SystemLosses.shading_near` (default 3% sull'anno, `engine/solar.py:187`).
 - **Formato timestamp.** PVGIS ha cambiato formato timestamp intorno al 2024; il parser supporta entrambi (`engine/pvgis_client.py:323-337`). Anno di riferimento del TMY è virtuale (es. `0001-MM-DD HH:MM` o `YYYYMMDD:HHMM`).

@@ -6,6 +6,11 @@ Performs a full 8 760-hour simulation using the TMY from PVGIS.
 
 Physical models used
 --------------------
+NOTE (audit §1.3): pvlib is NOT installed (locally or on Railway), so the
+standalone path always runs. Solar position there uses Cooper's declination
+and Spencer's equation of time; the pvlib references below describe the
+optional path only.
+
 Solar position     : pvlib.solarposition (Spencer / Grover algorithm)
 Irradiance transp. : Perez 1990 anisotropic sky model  (most accurate for tilted surfaces)
 Horizon shading    : geometric occlusion from PVGIS horizon profile
@@ -565,7 +570,9 @@ def _is_horizon_shaded(
 # (U0 [W/m²K], U1 [W·s/m³K])
 FAIMAN_COEFFICIENTS = {
     "open_rack":        (25.0, 6.84),   # free-standing, good ventilation
-    "close_roof":       (29.0, 0.00),   # flush-mounted on roof, limited ventilation
+    # close_roof was 29.0 (the free-standing value): optimistic by ~4.5 % on
+    # residential output (audit §2.2). 20.0 = PVsyst "semi-integrated, air duct behind".
+    "close_roof":       (20.0, 0.00),   # flush-mounted on roof, limited ventilation
     "integrated_roof":  (15.0, 0.00),   # BIPV, poor ventilation
     "flat_roof_ballast":(20.0, 0.00),   # ballasted flat roof mount
 }

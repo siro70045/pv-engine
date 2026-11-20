@@ -23,7 +23,8 @@ Endpoint used:
 Notes
 -----
 - PVGIS TMY covers Europe, Africa, Asia and the Americas using
-  SARAH-3 / ERA5 satellite datasets (2005–2020 typical).
+  SARAH / ERA5 datasets. The v5_2 TMY endpoint used here returns
+  PVGIS-SARAH2 (2005–2020); SARAH3 is only on PVGIS 5.3 (audit §1.1).
 - Irradiance values in the TMY are instantaneous [W/m²] measured
   at the centre of each hour.  Multiplying by 1 h gives [Wh/m²].
 - The module works entirely with standard-library modules

@@ -185,6 +185,11 @@ class FinancialParameters:
     """
     discount_rate: float = 0.05
     energy_price_escalation: float = 0.025
+    # Escalation of the EXPORT (sell-back) price [fraction/yr]. None = same as
+    # energy_price_escalation (legacy behaviour, keeps school numbers bit-identical).
+    # Residential sets it explicitly: midday market prices tend to fall as PV
+    # grows, while the purchase price carries grid/tax components that follow inflation.
+    export_price_escalation: Optional[float] = None
     inflation_rate: float = 0.02
     analysis_years: int = 25
     financing_equity_fraction: float = 1.0
@@ -642,6 +647,7 @@ def _calc_economics_core(
     capex       = investment.total_capex_eur
     r           = fin.discount_rate
     esc         = fin.energy_price_escalation
+    esc_exp     = fin.export_price_escalation
     incentive_pv = _incentive_present_value(capex, incentives, fin)
     loan_pmt    = _annual_loan_payment(
         capex * (1.0 - fin.financing_equity_fraction),
@@ -662,7 +668,11 @@ def _calc_economics_core(
     for yr in range(1, n_years + 1):
         res     = yearly_results[yr - 1]
         saving  = res.annual_saving_eur * (1 + esc)**(yr - 1)
-        export  = (res.export_revenue_eur + res.demand_charge_saving_eur) * (1 + esc)**(yr - 1)
+        if esc_exp is None:
+            export = (res.export_revenue_eur + res.demand_charge_saving_eur) * (1 + esc)**(yr - 1)
+        else:
+            export = (res.export_revenue_eur * (1 + esc_exp)**(yr - 1)
+                      + res.demand_charge_saving_eur * (1 + esc)**(yr - 1))
         cer     = (res.pv_production_kWh * incentives.cer_shared_fraction
                    * incentives.cer_incentivo_eur_kWh
                    if incentives.cer_incentivo_eur_kWh > 0 else 0.0)
@@ -766,6 +776,7 @@ def calc_economics(
     capex       = investment.total_capex_eur
     r           = fin.discount_rate
     esc         = fin.energy_price_escalation
+    esc_exp     = fin.export_price_escalation
 
     # ── Incentive present value ───────────────────────────────────────────────
     incentive_pv = _incentive_present_value(capex, incentives, fin)
@@ -819,8 +830,12 @@ def calc_economics(
         # We use the actual yearly result which already has degradation applied.
         # To account for price escalation, scale year-1 saving by (1+esc)^(yr-1).
         energy_saving  = res.annual_saving_eur   * (1 + esc)**(yr - 1)
-        export_revenue = (res.export_revenue_eur
-                          + res.demand_charge_saving_eur) * (1 + esc)**(yr - 1)
+        if esc_exp is None:
+            export_revenue = (res.export_revenue_eur
+                              + res.demand_charge_saving_eur) * (1 + esc)**(yr - 1)
+        else:
+            export_revenue = (res.export_revenue_eur * (1 + esc_exp)**(yr - 1)
+                              + res.demand_charge_saving_eur * (1 + esc)**(yr - 1))
 
         # CER incentive
         cer_incentive = 0.0
@@ -959,6 +974,7 @@ def calc_economics(
         fin_s = FinancialParameters(
             discount_rate              = r_s,
             energy_price_escalation    = esc_s,
+            export_price_escalation    = fin.export_price_escalation,
             inflation_rate             = fin.inflation_rate,
             analysis_years             = n_years,
             financing_equity_fraction  = fin.financing_equity_fraction,

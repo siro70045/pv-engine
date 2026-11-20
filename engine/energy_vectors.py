@@ -401,7 +401,7 @@ class BuildingEnergyProfile:
         True if building has a gas system. Shortcut flag.
     co2_electricity_kg_per_kwh : float
         CO₂ factor for grid electricity [kg CO₂/kWh_el].
-        Default: Italian grid 2024 (ENTSO-E).
+        Default: Italian grid mix 2023 (ENTSO-E).
     """
     electricity_kwh_annual: float = 0.0
     electricity_monthly_kwh: list[float] = field(default_factory=list)

@@ -15,6 +15,25 @@ from pydantic import BaseModel, Field
 from api.schemas.estimate import CandidatoComune, ComuneRisolto, RangeLowHigh
 
 
+class FaldaRilevata(BaseModel):
+    """Single roof segment as returned by Google Solar buildingInsights."""
+    pitch_deg: float                  # inclination [°], directly usable as pvlib tilt
+    azimuth_deg: float                # 0=N, 90=E, 180=S, 270=W (same convention as pvlib)
+    area_m2: float                    # sloped surface area [m²]
+    ground_area_m2: float             # projected (horizontal) area [m²]
+    sunshine_quantiles: list[float]   # 11 percentiles (0–100th) of annual sunshine hours
+    migliore: bool                    # True for the segment with the highest simulated yield per kWp
+    usata: bool = False               # True if PV is placed on this segment in the calculation
+
+
+class TettoRilevato(BaseModel):
+    """Roof geometry retrieved from Google Solar API for a given lat/lon."""
+    falde: list[FaldaRilevata]
+    imagery_quality: str              # "HIGH" | "MEDIUM" | "BASE"
+    imagery_date: str                 # "YYYY-MM-DD"
+    usato_nel_calcolo: bool           # True only when conferma_tetto=True and data was applied
+
+
 class EstimateCasaRequest(BaseModel):
     # ── Location ──────────────────────────────────────────────────────────────
     comune: str = Field(..., min_length=2, description="Nome del comune (denominazione ISTAT).")
@@ -54,14 +73,14 @@ class EstimateCasaRequest(BaseModel):
     )
 
     # ── PV ────────────────────────────────────────────────────────────────────
-    orientamento: Literal["sud", "sud_est_sud_ovest", "est_o_ovest", "nord", "non_so"] = Field(
+    orientamento: Literal["sud", "sud_est_sud_ovest", "est", "ovest", "est_o_ovest", "nord", "non_so"] = Field(
         default="non_so",
         description=(
             "Orientamento della falda dove installare i pannelli (una sola falda). "
             "'sud'=ottimale (azimuth 180°); "
             "'sud_est_sud_ovest'=leggermente deviato, ~20° dal sud (azimuth 200°); "
-            "'est_o_ovest'=falda esposta a est OPPURE a ovest — si modella come ovest puro "
-            "(azimuth 270°), produzione ~80% rispetto a sud pieno; "
+            "'est'=falda esposta a est (azimuth 90°); 'ovest'=falda esposta a ovest (azimuth 270°); "
+            "'est_o_ovest'=valore storico, modellato come est (il meno favorevole); "
             "'nord'=falda esposta a nord, sfavorevole (azimuth 0°); "
             "'non_so'=orientamento ignoto — si assume sud-ovest (azimuth 225°) come ipotesi prudente."
         ),
@@ -79,8 +98,9 @@ class EstimateCasaRequest(BaseModel):
     irpef_annua_stimata: Optional[float] = Field(
         default=None, ge=0,
         description=(
-            "IRPEF lorda annua stimata [€]. Se assente, si assume capienza piena "
-            "(ottimistico — la perdita fiscale non viene calcolata)."
+            "IRPEF lorda annua stimata [€]. Se fornita, la detrazione usata nel calcolo "
+            "(NPV, rientro) è limitata all'imposta di ogni anno. Se assente, si assume "
+            "capienza piena (ipotesi ottimistica per i redditi bassi)."
         ),
     )
 
@@ -118,6 +138,32 @@ class EstimateCasaRequest(BaseModel):
             "'ventilconvettori': fan coil (40–45°C), buono per HP; "
             "'non_so': ipotesi conservativa (termosifoni, peggiore caso). "
             "Se assente, si usa SCOP conservativo 2.5 (zona C-E media)."
+        ),
+    )
+
+    # ── Google Solar (optional) ───────────────────────────────────────────────
+    lat: Optional[float] = Field(
+        default=None, ge=35.0, le=48.0,
+        description="Latitudine GPS della casa [°N]. Se fornita con lon, interroga Google Solar API.",
+    )
+    lon: Optional[float] = Field(
+        default=None, ge=6.0, le=19.0,
+        description="Longitudine GPS della casa [°E].",
+    )
+    conferma_tetto: bool = Field(
+        default=False,
+        description=(
+            "True se l'utente ha confermato che la geometria rilevata da Google Solar "
+            "corrisponde alla sua casa. Solo con conferma_tetto=True i dati Google "
+            "(pendenza, orientamento, area) vengono usati nel calcolo."
+        ),
+    )
+    tipo_abitazione: Literal["casa", "appartamento"] = Field(
+        default="casa",
+        description=(
+            "'casa': villa/unifamiliare — pendenza, orientamento e area reale da Google Solar. "
+            "'appartamento': il tetto è condiviso — solo pendenza e orientamento vengono usati, "
+            "non l'area (rimane la stima floor_area × 0.5)."
         ),
     )
 
@@ -246,9 +292,15 @@ class EstimateCasaResponse(BaseModel):
 
     # ── CAPEX ─────────────────────────────────────────────────────────────────
     capex_indicativo_eur: float
+    # Market band of the PV cost for this size (low/high curve): the reference a
+    # user can hold an installer's quote against.
+    capex_banda_eur: Optional[RangeLowHigh] = None
 
     # ── Human-readable assumptions for the honesty block ─────────────────────
     assunzioni: list[str]
 
     # ── Alternative scenarios ("cosa cambierebbe") ────────────────────────────
     scenari_alternativi: list[ScenarioAlternativoOut] = []
+
+    # ── Google Solar roof geometry (present when lat/lon were provided) ───────
+    tetto_rilevato: Optional[TettoRilevato] = None

@@ -15,7 +15,7 @@ AUTO-SIZING POLICY (non-negotiable):
 
     1. CAP: only candidates where production ≤ 150% of annual consumption are
        considered (prevents recommending systems that primarily sell to the grid
-       at the fragile 0.08 €/kWh export price).
+       at the fragile 0.06 €/kWh export price, ritiro dedicato).
     2. NPV-BEST: among those, pick the one with the highest senza_batteria NPV.
     3. FORCE-MINIMA: if all candidates exceed the cap (e.g. even the minimum
        market size of 1.5 kWp overshoots 150%), use the smallest candidate and
@@ -53,15 +53,29 @@ from api.schemas.estimate_casa import (
     DeltaVsBase,
     EstimateCasaRequest,
     EstimateCasaResponse,
+    FaldaRilevata,
     MetricheScenarioAlternativo,
     ScenarioAlternativoOut,
     ScenarioOut,
     TagliaOut,
+    TettoRilevato,
     TradeoffOut,
     VerdettoPV,
 )
+from residential.roof_google import (
+    RoofData,
+    RoofSegment,
+    SegmentPlan,
+    allocate_kwp,
+    fetch_roof_data,
+    plan_segments,
+)
 from api.utils.cache import get_cached_tmy
-from api.utils.cost import auto_scenarios, estimate_pv_cost_residential
+from api.utils.cost import (
+    auto_scenarios,
+    estimate_pv_cost_residential,
+    estimate_pv_cost_residential_range,
+)
 from buildings import kwp_from_area
 from engine.economics import (
     FinancialParameters,
@@ -95,11 +109,16 @@ from residential.battery_scenario import (
     DEFAULT_ANALYSIS_YEARS,
     DEFAULT_DISCOUNT_RATE,
     DEFAULT_ESC_RATE,
+    DEFAULT_EXPORT_ESC_RATE,
     DEFAULT_EXPORT_PRICE_EUR_KWH,
     DEFAULT_IMPORT_PRICE_EUR_KWH,
     DEFAULT_OM_PCT,
+    INVERTER_REPLACEMENT_YEAR,
+    OM_EUR_PER_KWP_YR,
     ScenarioResult,
+    battery_capex_eur,
     compare_battery_scenarios,
+    inverter_replacement_cost_eur,
 )
 from residential.estimate_defaults import (
     _DHW_KWH,
@@ -114,7 +133,7 @@ logger = logging.getLogger("pv_engine_api.estimate_casa")
 
 router = APIRouter(prefix="/estimate/casa", tags=["estimate"])
 
-# Italian grid CO₂ factor [kg/kWh] — single source of truth (ENTSO-E 2024)
+# Italian grid CO₂ factor [kg/kWh] — single source of truth (ENTSO-E IT mix 2023)
 _CO2_KG_PER_KWH = next(
     f.default for f in dataclasses.fields(BuildingEnergyProfile)
     if f.name == "co2_electricity_kg_per_kwh"
@@ -132,7 +151,7 @@ _AUTOSUFFICIENZA_AVVERTENZA_SOGLIA = 35.0
 
 # Sizing cap: auto-sizing only considers candidates whose annual production
 # does not exceed this multiple of the estimated annual consumption.
-# Above 150%: the system primarily sells to the grid at the fragile 0.08 €/kWh
+# Above 150%: the system primarily sells to the grid at the fragile 0.06 €/kWh
 # export price — not a "house-oriented" system.
 _MAX_PRODUZIONE_SU_CONSUMO = 1.50
 
@@ -142,12 +161,16 @@ _AVVISO_SOVRADIMENSIONAMENTO_RATIO = 1.50
 
 # Azimuth mapping for user-selected roof orientation.
 # Conventions: 0°=N, 90°=E, 180°=S, 270°=W.
-# est_o_ovest uses 270° (west face) as proxy; east gives same annual total.
+# est / ovest are separate: on the Albinea TMY east yields ~4 % less than west
+# (audit §L.3 h). Legacy est_o_ovest is kept for old clients and modelled as EAST
+# (the less favourable of the two = prudent).
 # non_so uses 225° (SW) as a prudent middle-ground for unknown orientation.
 _ORIENTAMENTO_AZIMUTH: dict[str, float] = {
     "sud":               180.0,
     "sud_est_sud_ovest": 200.0,
-    "est_o_ovest":       270.0,   # una sola falda: est O ovest, proxy ovest puro
+    "est":               90.0,
+    "ovest":             270.0,
+    "est_o_ovest":       90.0,    # legacy: modellato come est (prudente)
     "nord":              0.0,
     "non_so":            225.0,
 }
@@ -208,9 +231,12 @@ _FRAC_ACS_SU_BASE_ESTIVA: float = 0.60   # 60% ACS, 40% cottura
 _ORIENTAMENTO_DESC: dict[str, str] = {
     "sud":              "SUD (azimuth 180°, esposizione ottimale)",
     "sud_est_sud_ovest": "SUD-SUD-OVEST (azimuth 200°, ~20° dal sud — produzione ~97% rispetto a sud pieno)",
-    "est_o_ovest":      "EST O OVEST — una sola falda (azimuth 270°, modellata come ovest puro — "
-                        "produzione ~80% rispetto a sud pieno; vale sia per falda est che ovest in "
-                        "termini di produzione annua; un impianto su DUE falde richiede l'analisi di Livello 2)",
+    "est":              "EST (azimuth 90°, una sola falda — produzione circa il 75-80% rispetto a sud pieno; "
+                        "un impianto su due falde richiede l'analisi di Livello 2)",
+    "ovest":            "OVEST (azimuth 270°, una sola falda — produzione circa l'80% rispetto a sud pieno; "
+                        "un impianto su due falde richiede l'analisi di Livello 2)",
+    "est_o_ovest":      "EST O OVEST — una sola falda, calcolata come est (azimuth 90°, la meno favorevole "
+                        "delle due: ipotesi prudente; un impianto su due falde richiede l'analisi di Livello 2)",
     "nord":             "NORD (azimuth 0°, esposizione sfavorevole — produzione ~55-60% rispetto a sud pieno)",
     "non_so":           "SUD-OVEST (azimuth 225°, ipotesi prudente per orientamento non noto — "
                         "produzione ~90-95% rispetto a sud pieno; l'orientamento reale può "
@@ -323,7 +349,7 @@ def _to_scenario_out(sr: ScenarioResult) -> ScenarioOut:
 def _compute_beneficio_breakdown(sr: ScenarioResult) -> BeneficioBreakdown:
     saving = sr.economics.year1_saving_eur
     export = sr.economics.year1_export_revenue_eur
-    quota_detr = sr.detrazione_totale_eur / 10.0
+    quota_detr = sr.detrazione_effettiva_eur / 10.0
     return BeneficioBreakdown(
         risparmio_bolletta_eur=round(saving, 0),
         ricavi_export_eur=round(export, 0),
@@ -343,7 +369,8 @@ def _compute_verdetto(
     """Compute the honest verdict for a PV scenario.
 
     capex_eur is used to detect fragile-positive investments: NPV/capex < 10%
-    (= barely above break-even over 25 years, ~0.4% nominal annual return)
+    (NPV is already net of the 5 % discount rate, so 10 % of capex ≈ an IRR of
+    about 6 %, i.e. only ~1 point above the required return — audit §6.3)
     triggers the "marginale" label instead of "accettabile".
     With capex_eur=0 (default) the marginale threshold is never triggered.
     """
@@ -365,7 +392,8 @@ def _compute_verdetto(
     etichetta = ("negativo", "accettabile", "buono", "ottimo")[fin_grade]
 
     # Marginale override: NPV > 0 but below 10% of capex over 25 years.
-    # 10% of capex in 25 years ≈ 0.4% nominal annual return — below inflation.
+    # NPV is net of the 5 % discount rate: NPV/capex = 10 % ≈ IRR ~6 %, a thin
+    # margin above the required return (audit §6.3; the old "0.4 %/yr" note was wrong).
     # Example: 3 kWp @ €4.200 capex → threshold €420; nord case (€101) → marginale.
     if fin_grade >= 1 and npv > 0 and capex_eur > 0 and npv < capex_eur * 0.10:
         etichetta = "marginale"
@@ -388,7 +416,7 @@ def _compute_verdetto(
             f"⚠ Investimento fragile: recupereresti la spesa in ~{pb:.1f} anni "
             f"e dopo 25 anni ti resterebbero +€{_fmt_it(npv)} in tasca — "
             f"meno del 10% dei {_fmt_it(capex_eur)} € spesi.",
-            "Basta una variazione del prezzo di vendita alla rete (oggi 0,08 €/kWh), "
+            "Basta una variazione del prezzo di vendita alla rete (oggi stimato in 0,06 €/kWh), "
             "dell'aliquota IRPEF o dei prezzi dell'elettricità per azzerare quel margine.",
             "Prima di decidere ti consigliamo l'analisi di Livello 2 con i dati reali della tua casa.",
         ]
@@ -424,7 +452,7 @@ def _compute_verdetto(
         if sovradimensionato:
             parti.append(
                 f"⚠ L'impianto produce circa {prod_ratio:.1f} volte il tuo consumo annuo: "
-                "gran parte dell'energia va venduta alla rete (0,08 €/kWh). "
+                "gran parte dell'energia va venduta alla rete (circa 0,06 €/kWh). "
                 "La convenienza è fragile se quel prezzo cambia."
             )
         testo = " ".join(parti)
@@ -501,13 +529,79 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         consumo_da_bolletta = False
         avvertenze_consumo = ce.avvertenze
 
-    # ── 4. Roof area and auto_scenarios (coverage-based, unchanged) ───────────
-    roof_area = req.floor_area_m2 * 0.5
-    kwp_max = kwp_from_area(roof_area, "roof_integrated", 100.0)
-    taglie = auto_scenarios(centrale, kwp_max)
+    # ── 4. Roof area and orientation defaults ─────────────────────────────────
+    roof_area: float = req.floor_area_m2 * 0.5
+    tilt_deg: float = 30.0
+    azimuth: float = _ORIENTAMENTO_AZIMUTH[req.orientamento]
 
+    # ── 4b. Google Solar roof geometry (optional, non-blocking) ──────────────
+    _google_roof: Optional[RoofData] = None
+    _google_plan: list[SegmentPlan] = []
+    _google_best: Optional[RoofSegment] = None
+    _google_usato: bool = False
+    # Segments actually used for PV (house + confirmed roof only). Each one is
+    # simulated with its own tilt/azimuth (audit §6.2: one orientation for the
+    # summed area of several faces was optimistic).
+    _multi_falda: list[SegmentPlan] = []
+
+    if req.lat is not None and req.lon is not None:
+        _google_roof = fetch_roof_data(req.lat, req.lon)
+
+    if _google_roof is not None:
+        _yield_cache: dict[tuple[float, float], float] = {}
+
+        def _specific_yield(seg: RoofSegment) -> float:
+            key = (round(seg.pitch_deg, 1), round(seg.azimuth_deg, 1))
+            if key not in _yield_cache:
+                res_1kwp = simulate_pv(
+                    tmy,
+                    PVSystem(peak_power_kWp=1.0, tilt_deg=seg.pitch_deg, azimuth_deg=seg.azimuth_deg),
+                    mounting="close_roof",
+                )
+                _yield_cache[key] = res_1kwp.production_annual_kWh
+            return _yield_cache[key]
+
+        _google_plan = plan_segments(
+            _google_roof,
+            specific_yield=_specific_yield,
+            capacity=lambda seg: kwp_from_area(seg.area_m2, "roof_integrated", 100.0),
+        )
+        _google_best = _google_plan[0].segment
+        if req.conferma_tetto:
+            _google_usato = True
+            tilt_deg = _google_best.pitch_deg
+            azimuth = _google_best.azimuth_deg
+            if req.tipo_abitazione == "casa":
+                _multi_falda = _google_plan
+                roof_area = sum(p.segment.area_m2 for p in _google_plan)
+
+    if _multi_falda:
+        kwp_max = sum(p.capacity_kwp for p in _multi_falda)
+    else:
+        kwp_max = kwp_from_area(roof_area, "roof_integrated", 100.0)
+
+    def _simulate_kwp(kv: float) -> tuple[list[float], float]:
+        """Hourly AC [W] and annual kWh for kv kWp on this roof."""
+        if _multi_falda:
+            total = [0.0] * 8760
+            prod = 0.0
+            for plan_i, k_i in allocate_kwp(_multi_falda, kv):
+                res_i = simulate_pv(
+                    tmy,
+                    PVSystem(peak_power_kWp=k_i, tilt_deg=plan_i.segment.pitch_deg,
+                             azimuth_deg=plan_i.segment.azimuth_deg),
+                    mounting="close_roof",
+                )
+                total = [a + h.P_ac_W for a, h in zip(total, res_i.hourly)]
+                prod += res_i.production_annual_kWh
+            return total, prod
+        res = simulate_pv(
+            tmy, PVSystem(peak_power_kWp=kv, tilt_deg=tilt_deg, azimuth_deg=azimuth),
+            mounting="close_roof",
+        )
+        return [h.P_ac_W for h in res.hourly], res.production_annual_kWh
+    taglie = auto_scenarios(centrale, kwp_max)
     auto_dimensionato = req.potenza_kwp is None
-    azimuth = _ORIENTAMENTO_AZIMUTH[req.orientamento]
 
     # ── 5. Demand profile shape ───────────────────────────────────────────────
     profile_type = (
@@ -580,7 +674,7 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
             abitazione_principale=req.abitazione_principale,
             irpef_annua_stimata=req.irpef_annua_stimata,
         )
-        detr_pct = detr.detrazione_totale_eur / capex_val * 100.0 if capex_val > 0 else 0.0
+        detr_pct = detr.detrazione_effettiva_eur / capex_val * 100.0 if capex_val > 0 else 0.0
         tariff = GridTariff(
             import_price_eur_kWh=DEFAULT_IMPORT_PRICE_EUR_KWH,
             export_price_eur_kWh=DEFAULT_EXPORT_PRICE_EUR_KWH,
@@ -588,6 +682,7 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         fin = FinancialParameters(
             discount_rate=DEFAULT_DISCOUNT_RATE,
             energy_price_escalation=DEFAULT_ESC_RATE,
+            export_price_escalation=DEFAULT_EXPORT_ESC_RATE,
             analysis_years=DEFAULT_ANALYSIS_YEARS,
         )
         investment = InvestmentCost(
@@ -597,7 +692,10 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
             battery_capacity_kWh=0.0,
         )
         opex = OperatingCost(
-            om_pct_of_capex_per_yr=DEFAULT_OM_PCT,
+            om_pct_of_capex_per_yr=0.0,
+            om_fixed_eur_yr=OM_EUR_PER_KWP_YR * kwp_val,
+            inverter_replacement_year=INVERTER_REPLACEMENT_YEAR,
+            inverter_replacement_cost_eur=inverter_replacement_cost_eur(kwp_val),
             battery_replacement_years=[],
             battery_replacement_cost_eur_kWh=BATTERY_REPLACEMENT_COST_EUR_KWH,
         )
@@ -654,14 +752,12 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
     # before we commit to the primary kWp in section 10.
     taglia_data: dict[float, _TagliaData] = {}
     for kv in kwp_vals:
-        pv_sys_t = PVSystem(peak_power_kWp=kv, tilt_deg=30, azimuth_deg=azimuth)
-        pv_res_t = simulate_pv(tmy, pv_sys_t, mounting="close_roof")
+        pv_h_t, prod_t = _simulate_kwp(kv)
         capex_t = estimate_pv_cost_residential(kv)
-        pv_h_t = [h.P_ac_W for h in pv_res_t.hourly]
         taglia_data[kv] = _TagliaData(
             kwp=kv,
             pv_hourly_Wh=pv_h_t,
-            produzione_kwh=pv_res_t.production_annual_kWh,
+            produzione_kwh=prod_t,
             capex=capex_t,
             cmp=_run_battery(pv_h_t, _scale(centrale), kv, capex_t),
         )
@@ -699,14 +795,12 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         kwp = float(req.potenza_kwp)
         # If user's kWp is not in the pre-computed set, add it now.
         if not any(abs(kwp - k) < 0.01 for k in kwp_vals):
-            pv_sys_u = PVSystem(peak_power_kWp=kwp, tilt_deg=30, azimuth_deg=azimuth)
-            pv_res_u = simulate_pv(tmy, pv_sys_u, mounting="close_roof")
+            pv_h_u, prod_u = _simulate_kwp(kwp)
             capex_u = estimate_pv_cost_residential(kwp)
-            pv_h_u = [h.P_ac_W for h in pv_res_u.hourly]
             taglia_data[kwp] = _TagliaData(
                 kwp=kwp,
                 pv_hourly_Wh=pv_h_u,
-                produzione_kwh=pv_res_u.production_annual_kWh,
+                produzione_kwh=prod_u,
                 capex=capex_u,
                 cmp=_run_battery(pv_h_u, _scale(centrale), kwp, capex_u),
             )
@@ -808,7 +902,7 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
                 f"del tuo consumo) si ripaga in modo soddisfacente: il risultato migliore è "
                 f"{best_npv_nel_cap:+,.0f} € in tasca dopo 25 anni. "
                 "Gli impianti più grandi sembrano più convenienti sulla carta, "
-                "ma quasi tutto l'extra andrebbe venduto alla rete a 0,08 €/kWh — "
+                "ma quasi tutto l'extra andrebbe venduto alla rete a circa 0,06 €/kWh — "
                 "un'ipotesi che può cambiare nel tempo. "
                 "Verifica il tuo consumo reale o chiedi l'analisi di Livello 2."
             )
@@ -871,38 +965,101 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
     else:
         sizing_note = "potenza indicata dall'utente"
 
+    # Roof area description depends on whether Google Solar data was applied
+    if _google_usato and req.tipo_abitazione == "casa":
+        _roof_area_nota = (
+            f"Superficie abitativa: {_fmt_it(req.floor_area_m2)} m² → "
+            f"area di tetto rilevata da Google Solar: {_fmt_it(roof_area)} m² "
+            f"(falde utilizzabili: {len(_multi_falda)}; escluse quelle che rendono meno del 70% della migliore)"
+        )
+    elif _google_usato and req.tipo_abitazione == "appartamento":
+        _roof_area_nota = (
+            f"Superficie abitativa: {_fmt_it(req.floor_area_m2)} m² → "
+            f"area di tetto stimata: {_fmt_it(roof_area)} m² "
+            "(condominio — tetto condiviso; solo pendenza e orientamento dalla geometria rilevata)"
+        )
+    else:
+        _roof_area_nota = (
+            f"Superficie abitativa: {_fmt_it(req.floor_area_m2)} m² → "
+            f"area di tetto stimata: {_fmt_it(roof_area)} m² (circa la metà, falda inclinata)"
+        )
+
+    if _multi_falda and len(allocate_kwp(_multi_falda, kwp)) > 1:
+        _parti = allocate_kwp(_multi_falda, kwp)
+        _tilt_nota = (
+            f"Impianto: {kwp:.1f} kWp su {len(_parti)} falde (geometria reale Google Solar), {sizing_note}"
+        )
+        _orientamento_nota = "Falde usate: " + "; ".join(
+            f"{k_i:.1f} kWp su falda inclinata {p_i.segment.pitch_deg:.0f}°, azimuth "
+            f"{p_i.segment.azimuth_deg:.0f}° ({p_i.specific_yield_kwh_kwp:.0f} kWh/kWp)"
+            for p_i, k_i in _parti
+        ) + " — 0°=Nord, 90°=Est, 180°=Sud, 270°=Ovest"
+    elif _google_usato:
+        _tilt_nota = (
+            f"Impianto: {kwp:.1f} kWp, inclinazione {tilt_deg:.0f}° (geometria reale Google Solar), "
+            f"{sizing_note}"
+        )
+        _orientamento_nota = (
+            f"Orientamento tetto: azimuth {azimuth:.0f}° (geometria reale Google Solar — "
+            "0°=Nord, 90°=Est, 180°=Sud, 270°=Ovest)"
+        )
+    else:
+        _tilt_nota = f"Impianto: {kwp:.1f} kWp, inclinazione 30° (falda tipica), {sizing_note}"
+        _orientamento_nota = f"Orientamento tetto: {_ORIENTAMENTO_DESC[req.orientamento]}"
+
     assunzioni = [
         consumo_fonte_label,
         f"Profilo d'uso: {profilo_label}",
-        f"Superficie abitativa: {_fmt_it(req.floor_area_m2)} m² → "
-        f"area di tetto stimata: {_fmt_it(roof_area)} m² (circa la metà, falda inclinata)",
+        _roof_area_nota,
         zona_label,
-        f"Impianto: {kwp:.1f} kWp, inclinazione 30° (falda tipica), {sizing_note}",
-        f"Orientamento tetto: {_ORIENTAMENTO_DESC[req.orientamento]}",
+        _tilt_nota,
+        _orientamento_nota,
         f"Costo indicativo dell'impianto: €{_fmt_it(pv_capex)} totali "
-        f"(€{pv_cost_per_kwp:,.0f}/kWp in media; include €1.500 di costi fissi: "
-        f"ponteggio, inverter, CILA)",
+        f"(€{pv_cost_per_kwp:,.0f}/kWp in media, IVA inclusa): circa €2.500 di parte fissa "
+        f"(sopralluogo, progetto, inverter, connessione alla rete, collaudo, sicurezza sul tetto) "
+        f"più €1.150 per kWp (pannelli, strutture, posa). Fascia di mercato ragionevole: "
+        f"€{_fmt_it(estimate_pv_cost_residential_range(kwp)[0])}–"
+        f"€{_fmt_it(estimate_pv_cost_residential_range(kwp)[1])}. Tetti con vincoli o "
+        f"lavori extra (coppi, quadro elettrico) possono costare di più",
+        f"Sostituzione dell'inverter all'anno {INVERTER_REPLACEMENT_YEAR}: "
+        f"€{_fmt_it(inverter_replacement_cost_eur(kwp))} (durata tipica 10-15 anni)",
         f"Batteria nell'alternativa: {battery_kwh:.0f} kWh "
-        f"(costo €{_fmt_it(battery_kwh * 550)} — €550/kWh installato, fonte ENEA RAEE 2023)",
+        f"(costo €{_fmt_it(battery_capex_eur(battery_kwh))} installata: €1.200 di parte fissa "
+        f"più €550/kWh; sostituzione quando scende all'80% della capacità)",
         (
             "Detrazione fiscale (IRPEF): "
             + ("50%" if req.abitazione_principale else "36%")
             + " "
             + ("per l'abitazione principale" if req.abitazione_principale else "(altro immobile)")
-            + ", recuperata in 10 anni, tetto €96.000 (art. 16-bis TUIR, L. 207/2024)"
+            + ", recuperata in 10 anni, tetto €96.000 (art. 16-bis TUIR; aliquote 2026 "
+            "dalla Legge di Bilancio 2026, L. 199/2025)"
         ),
-        "Prezzi usati: 0,25 €/kWh per l'energia acquistata, 0,08 €/kWh per quella venduta alla rete; "
-        "orizzonte di analisi 25 anni, degrado impianto 0,5 %/anno, "
-        "rivalutazione prezzi elettricità 2,5 %/anno",
-        "⚠ La detrazione al 50% vale per spese sostenute nel 2026 (L. 207/2024). "
-        "Dal 2027 scende al 36%, salvo nuove proroghe.",
-        "⚠ Il prezzo di vendita alla rete (0,08 €/kWh, GSE scambio sul posto 2026) "
-        "può variare se le condizioni cambiano.",
+        "Prezzi usati: 0,25 €/kWh per l'energia acquistata (+2,5 %/anno), 0,06 €/kWh per quella "
+        "venduta alla rete (+1,5 %/anno, come l'inflazione); orizzonte di analisi 25 anni, "
+        "degrado impianto 0,5 %/anno",
+        "⚠ Le aliquote della detrazione sono garantite per le spese sostenute nel 2026. "
+        "Per il 2027 la legge di bilancio in discussione prevede di confermarle; senza proroga "
+        "scenderebbero al 36% (abitazione principale) e al 30% (altri immobili).",
+        "⚠ L'energia venduta alla rete passa dal ritiro dedicato del GSE (lo scambio sul posto non è "
+        "più attivabile per i nuovi impianti): prezzo minimo garantito 0,0475 €/kWh nel 2026, prezzo "
+        "di mercato variabile ora per ora. Usiamo 0,06 €/kWh come stima prudente.",
         "Stima automatica di Livello 1 — i valori reali dipendono dalla tua casa "
         "e richiedono l'analisi di Livello 2",
     ]
     assunzioni.extend(avvertenze_consumo)
-    if req.orientamento == "non_so":
+
+    if _google_usato and _google_roof is not None:
+        assunzioni.extend([
+            f"Geometria tetto: Google Solar API — {len(_google_roof.segments)} falde rilevate, "
+            f"qualità immagini {_google_roof.imagery_quality} (data {_google_roof.imagery_date_str})",
+            f"⚠ Le immagini del tetto risalgono al {_google_roof.imagery_year}: "
+            "se il tetto è stato modificato nel frattempo, la geometria potrebbe non essere aggiornata.",
+            "⚠ Ombreggiamento non modellato: i dati orari di ombra non sono disponibili "
+            "per account europei (limitazione Google Solar API). La produzione reale può essere inferiore "
+            "in presenza di ombreggiamento parziale.",
+        ])
+
+    if req.orientamento == "non_so" and not _google_usato:
         assunzioni.append(
             "⚠ Orientamento non dichiarato: calcoliamo con esposizione a sud-ovest (ipotesi prudente). "
             "Un tetto esposto a est o a ovest produce circa il 15-20% in meno; "
@@ -983,14 +1140,20 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
             # ── Benchmark fallback (no gas bill provided) ─────────────────────
             # Uses area-based HP benchmark + DHW table. Mark as indicative.
             cottura_kwh_e = 0.0   # cooking stays gas, not modeled
-            heating_kwh_e = req.floor_area_m2 * _HP_KWH_PER_M2_CENTRAL
+            # The area benchmark is ELECTRIC energy at the benchmark SCOP. Convert it
+            # back to heat and divide by the site/terminal SCOP shown to the user, so
+            # the number we display is the number we use (audit §L.3 j).
+            heating_kwh_e = (
+                req.floor_area_m2 * _HP_KWH_PER_M2_CENTRAL * _SCOP_BENCHMARK / scop_heat
+            )
             acs_kwh_e = (
                 0.0 if req.acqua_calda_elettrica
                 else float(_DHW_KWH[min(req.n_occupants, _DHW_MAX)])
             )
             fonte_heating = (
                 f"benchmark area: {req.floor_area_m2:.0f} m² × {_HP_KWH_PER_M2_CENTRAL} kWh_e/m² "
-                f"(SCOP medio {_SCOP_BENCHMARK}, ENEA RAEE 2023)"
+                f"(ENEA RAEE 2023, a SCOP {_SCOP_BENCHMARK}) riportato al SCOP stimato "
+                f"{scop_heat:.2f} per i tuoi terminali"
                 + ("" if req.acqua_calda_elettrica
                    else f" + ACS {acs_kwh_e:.0f} kWh ({req.n_occupants} occupanti)")
             )
@@ -1100,6 +1263,27 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
             ),
         ))
 
+    # ── 19. Build tetto_rilevato (present whenever lat/lon were provided) ─────
+    tetto_rilevato: Optional[TettoRilevato] = None
+    if _google_roof is not None:
+        falde_out: list[FaldaRilevata] = []
+        for seg in _google_roof.segments:
+            falde_out.append(FaldaRilevata(
+                pitch_deg=round(seg.pitch_deg, 1),
+                azimuth_deg=round(seg.azimuth_deg, 1),
+                area_m2=round(seg.area_m2, 1),
+                ground_area_m2=round(seg.ground_area_m2, 1),
+                sunshine_quantiles=[round(q, 1) for q in seg.sunshine_quantiles],
+                migliore=(seg is _google_best),
+                usata=any(p.segment is seg for p in _multi_falda),
+            ))
+        tetto_rilevato = TettoRilevato(
+            falde=falde_out,
+            imagery_quality=_google_roof.imagery_quality,
+            imagery_date=_google_roof.imagery_date_str,
+            usato_nel_calcolo=_google_usato,
+        )
+
     return EstimateCasaResponse(
         comune_risolto=ComuneRisolto(
             nome=comune.nome,
@@ -1132,6 +1316,11 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         verdetto_pv=verdetto_pv,
         taglie_confronto=taglie_confronto,
         capex_indicativo_eur=float(pv_capex),
+        capex_banda_eur=RangeLowHigh(
+            low=float(estimate_pv_cost_residential_range(kwp)[0]),
+            high=float(estimate_pv_cost_residential_range(kwp)[1]),
+        ),
         assunzioni=assunzioni,
         scenari_alternativi=scenari_alternativi,
+        tetto_rilevato=tetto_rilevato,
     )

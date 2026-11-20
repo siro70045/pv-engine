@@ -8,32 +8,34 @@ importing those Streamlit modules.
 from __future__ import annotations
 
 
-# Costi fissi residenziali [€] — ponteggio, inverter, CILA/pratiche, collaudo GSE.
-# Non proporzionali alla taglia: presenti anche per un impianto da 1,5 kWp.
-# Fonte: listini installatori 2026 (media Italia centro-nord), voce "fissi" €1.200-1.800.
-FIXED_RESIDENTIAL_EUR: float = 1_500.0
+# Residential turnkey cost = FIXED + VARIABLE × kWp, VAT 10 % included, no battery.
+# Calibrated 20 nov 2026 on: GSE survey for IEA PVPS National Survey Report Italy
+# 2024 (rooftop < 10 kW: 1,39 €/W excl. VAT, 1,53 €/W incl.), regional price list
+# Piemonte 2026 (inverter almost entirely fixed), public spending caps (Reddito
+# Energetico 2.000 € + 1.500 €/kW incl. 10 years of services = upper bound; CACER)
+# and installer/comparator quotes as plausibility checks.
+# FIXED: survey, design, base inverter, Modello Unico/grid connection, testing,
+#        roof safety. VARIABLE: modules, mounting, cables, labour, margin.
+# The previous tiers (2.100/1.800 €/kWp) were already all-in prices to which
+# 2.300 € of fixed costs were added again (inverter and permits counted twice):
+# about +31 % at 3 kWp and +33 % at 6 kWp versus this curve.
+RESIDENTIAL_FIXED_EUR: dict[str, float] = {"low": 1_800.0, "central": 2_500.0, "high": 3_200.0}
+RESIDENTIAL_EUR_PER_KWP: dict[str, float] = {"low": 1_000.0, "central": 1_150.0, "high": 1_450.0}
+
+
+def _residential_cost(kwp: float, scenario: str) -> int:
+    cost = RESIDENTIAL_FIXED_EUR[scenario] + RESIDENTIAL_EUR_PER_KWP[scenario] * float(kwp)
+    return int(round(cost, -2))
 
 
 def estimate_pv_cost_residential(kwp: float) -> int:
-    """All-in residential PV installation cost [€]."""
-    tiers = [
-        (3,    2100), (6,   1800), (20,  1500),
-        (50,   1250), (100, 1050), (250,  900),
-        (float("inf"), 800),
-    ]
-    cost = 0.0
-    remaining = float(kwp)
-    prev = 0.0
-    for thresh, eur_kwp in tiers:
-        if remaining <= 0:
-            break
-        in_tier = min(remaining, thresh - prev)
-        cost += in_tier * eur_kwp
-        remaining -= in_tier
-        prev = thresh
-    cost += max(800.0, kwp * 18.0)   # design + permits + grid connection
-    cost += FIXED_RESIDENTIAL_EUR    # costi fissi: ponteggio, inverter, CILA, collaudo
-    return int(round(cost, -2))
+    """Central turnkey residential PV cost [€], VAT included, no battery."""
+    return _residential_cost(kwp, "central")
+
+
+def estimate_pv_cost_residential_range(kwp: float) -> tuple[int, int]:
+    """(low, high) band of the residential cost for a quote comparison [€]."""
+    return _residential_cost(kwp, "low"), _residential_cost(kwp, "high")
 
 
 def estimate_pv_cost_school(kwp: float) -> tuple[int, int]:
@@ -75,10 +77,12 @@ def estimate_pv_cost(kwp: float, building_type: str) -> dict:
             },
         }
     total = estimate_pv_cost_residential(kwp)
-    equipment = int(round(total * 0.76))
-    installation = int(round(total * 0.15))
-    permits = max(800, int(round(kwp * 18)))
-    other = max(0, total - equipment - installation - permits)
+    fixed = int(RESIDENTIAL_FIXED_EUR["central"])
+    variable = max(0, total - fixed)
+    equipment = int(round(variable * 0.80))
+    installation = variable - equipment
+    permits = 800                       # part of the fixed cost
+    other = max(0, fixed - permits)     # inverter, connection, testing, safety
     return {
         "total_cost_eur":   total,
         "cost_per_kWp":     round(total / kwp, 1) if kwp > 0 else 0.0,

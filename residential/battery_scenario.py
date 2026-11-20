@@ -18,8 +18,8 @@ porta il costo nell'anno corretto. Il wrapper usa queste API — non le reimplem
 
 Per LFP residenziale con ~230 cicli/anno (working_family: 1 ciclo/giorno × 365
 × fattore di utilizzo parziale 0.63), il modello di degrado prevede la prima
-sostituzione intorno all'anno 12-14, compatibile con la garanzia LFP tipica
-(10 anni / 4000 cicli a 80 %).
+sostituzione intorno all'anno 9 (calendario 2 %/anno dominante; audit §L.3 c —
+il vecchio commento diceva 12-14). Il 2 %/anno è prudente per le LFP moderne.
 
 Passo 1 — Dimensionamento di default
 --------------------------------------
@@ -36,7 +36,7 @@ Stima consumo serale:
   - Per famiglia 4 pers/90 m² (1.495 kWh/anno proxy): ~1.495 × 0.27 / 365 ×
     giorni_FV_utili ≈ 1.1 kWh/sera
   - Taglia batteria "1 ciclo al giorno": 1.1 kWh utilizzabili → nominale ~1.4 kWh
-    (DoD 80 %, SoC min 5 %)
+    (finestra utile 85 %: SoC 5–90 %)
   - Arrotondato per eccesso a 3 kWh nominali: il mercato non offre tagli < 2.5
     kWh per prodotti residenziali certificati (catalogo 2026: Pylontech FORCE-H1
     2.4 kWh, Solax Triple Power 5.8 kWh, SolarEdge Home Battery 9.7 kWh).
@@ -98,11 +98,27 @@ from residential.incentives import calc_irpef_deduction
 # v. docstring del modulo per la derivazione.
 DEFAULT_BATTERY_KWH: float = 3.0
 
-# Costo batteria installata [€/kWh] — ENEA RAEE 2023 [B2], valore centrale
+# Costo batteria installata = FISSO + €/kWh (IVA inclusa). Ricalibrato 20 nov 2026:
+# il fisso copre sovrapprezzo dell'inverter ibrido, BMS e posa; senza fisso le
+# batterie piccole risultavano sottostimate. ≈790 €/kWh a 5 kWh, ≈670 €/kWh a 10 kWh.
+BATTERY_FIXED_EUR: float = 1_200.0
 BATTERY_COST_EUR_KWH: float = 550.0
 
-# Costo sostituzione batteria [€/kWh] — IEA 2024, calo prezzi previsto [B3]
-BATTERY_REPLACEMENT_COST_EUR_KWH: float = 380.0
+# Costo sostituzione batteria [€/kWh] — prezzi dei pacchi in calo, ma posa e
+# smaltimento no: 450 (range 350-600) invece del precedente 380, troppo ottimista.
+BATTERY_REPLACEMENT_COST_EUR_KWH: float = 450.0
+
+# O&M residenziale: valore assoluto per kWp, non % del capex (la manutenzione non
+# scende col prezzo dei moduli). 15 €/kWp/anno (range 10-25), +2 %/anno.
+# Riferimento: studio ARERA/GSE FER-X, 13-24 €/kW/anno osservati (impianti 20-1.000 kW).
+OM_EUR_PER_KWP_YR: float = 15.0
+
+
+def battery_capex_eur(battery_kwh: float, cost_eur_kwh: float = BATTERY_COST_EUR_KWH) -> float:
+    """Installed battery cost [€]: fixed part + €/kWh. 0 for no battery."""
+    if battery_kwh <= 0:
+        return 0.0
+    return BATTERY_FIXED_EUR + cost_eur_kwh * battery_kwh
 
 # Cicli/anno stimati per profilo working_family [B4] — DA RIVALIDARE
 BATTERY_CYCLES_PER_YEAR: float = 230.0
@@ -112,12 +128,32 @@ BATTERY_REPLACEMENT_THRESHOLD: float = 0.80
 
 # Prezzi energia residenziale 2026 [€/kWh]
 DEFAULT_IMPORT_PRICE_EUR_KWH: float = 0.25   # tariffa media 2026, ARERA
-DEFAULT_EXPORT_PRICE_EUR_KWH: float = 0.08   # prezzo GSE scambio sul posto (stima)
+# Cessione in rete: RITIRO DEDICATO GSE. Lo scambio sul posto non è più attivabile
+# per impianti entrati in esercizio dopo il 29/05/2025 (delibera ARERA 78/2025/R/efr).
+# Prezzo minimo garantito FV 2026: 0,0475 €/kWh (ARERA, +1,4% FOI); prezzi zonali
+# nelle ore solari più alti ma in calo con la diffusione del FV.
+# 0,06 = scelta prudente intermedia (decisione 20/11/2026, audit §5.3).
+DEFAULT_EXPORT_PRICE_EUR_KWH: float = 0.06
 
 # Parametri finanziari di default
 DEFAULT_ANALYSIS_YEARS: int   = 25
 DEFAULT_DISCOUNT_RATE: float  = 0.05
-DEFAULT_ESC_RATE: float       = 0.025  # escalation prezzo elettricità
+DEFAULT_ESC_RATE: float       = 0.025  # escalation prezzo di ACQUISTO elettricità
+# Escalation del prezzo di CESSIONE: segue l'inflazione come il prezzo minimo
+# garantito (aggiornato ogni anno da ARERA con l'indice FOI), non il 2,5% dell'acquisto.
+# Decisione 20/11/2026 (opzione B), audit §5.3.
+DEFAULT_EXPORT_ESC_RATE: float = 0.015
+
+# Sostituzione inverter (audit §5.3: assente = ottimista). Vita utile 10-15 anni;
+# costo di mercato 1.000-2.500 € per impianti residenziali. Un solo cambio nei 25 anni.
+INVERTER_REPLACEMENT_YEAR: int = 12
+INVERTER_REPLACEMENT_FIXED_EUR: float = 1000.0
+INVERTER_REPLACEMENT_EUR_PER_KWP: float = 100.0
+
+
+def inverter_replacement_cost_eur(pv_kwp: float) -> float:
+    """Cost of the single inverter replacement at INVERTER_REPLACEMENT_YEAR [€]."""
+    return INVERTER_REPLACEMENT_FIXED_EUR + INVERTER_REPLACEMENT_EUR_PER_KWP * pv_kwp
 DEFAULT_OM_PCT: float         = 1.0    # O&M = 1% del CAPEX/anno
 
 
@@ -186,6 +222,7 @@ def compare_battery_scenarios(
     analysis_years: int = DEFAULT_ANALYSIS_YEARS,
     discount_rate: float = DEFAULT_DISCOUNT_RATE,
     escalation_rate: float = DEFAULT_ESC_RATE,
+    export_escalation_rate: float = DEFAULT_EXPORT_ESC_RATE,
 ) -> BatteryScenarioComparison:
     """Confronta due scenari residenziali: senza e con batteria.
 
@@ -243,6 +280,7 @@ def compare_battery_scenarios(
     fin = FinancialParameters(
         discount_rate=discount_rate,
         energy_price_escalation=escalation_rate,
+        export_price_escalation=export_escalation_rate,
         analysis_years=analysis_years,
     )
 
@@ -260,8 +298,10 @@ def compare_battery_scenarios(
 
         # CAPEX
         pv_capex = pv_kwp * pv_cost_eur_kwp
-        bat_capex = bat_kwh * battery_cost_eur_kwh
+        bat_capex = battery_capex_eur(bat_kwh, battery_cost_eur_kwh)
         total_capex = pv_capex + bat_capex
+        # The engine takes a €/kWh figure: pass the effective one (fixed part included).
+        bat_eff_eur_kwh = bat_capex / bat_kwh if bat_kwh > 0 else 0.0
 
         # Detrazione IRPEF — sul CAPEX totale (PV + batteria, stesso tetto 96k)
         detr = calc_irpef_deduction(
@@ -269,20 +309,24 @@ def compare_battery_scenarios(
             abitazione_principale=abitazione_principale,
             irpef_annua_stimata=irpef_annua_stimata,
         )
-        # Percentuale effettiva per il motore (già agganciata a spesa_agevolabile)
+        # Percentuale per il motore: detrazione EFFETTIVA (limitata dalla capienza
+        # IRPEF quando l'utente la dichiara; = totale con capienza piena). Audit §5.2.
         detr_pct_for_engine = (
-            detr.detrazione_totale_eur / total_capex * 100.0
+            detr.detrazione_effettiva_eur / total_capex * 100.0
             if total_capex > 0 else 0.0
         )
 
         investment = InvestmentCost(
             pv_cost_eur_kWp=pv_cost_eur_kwp,
             peak_power_kWp=pv_kwp,
-            battery_cost_eur_kWh=battery_cost_eur_kwh if bat_kwh > 0 else 0.0,
+            battery_cost_eur_kWh=bat_eff_eur_kwh,
             battery_capacity_kWh=bat_kwh,
         )
         opex = OperatingCost(
-            om_pct_of_capex_per_yr=DEFAULT_OM_PCT,
+            om_pct_of_capex_per_yr=0.0,
+            om_fixed_eur_yr=OM_EUR_PER_KWP_YR * pv_kwp,
+            inverter_replacement_year=INVERTER_REPLACEMENT_YEAR,
+            inverter_replacement_cost_eur=inverter_replacement_cost_eur(pv_kwp),
             battery_replacement_years=repl_years,
             battery_replacement_cost_eur_kWh=BATTERY_REPLACEMENT_COST_EUR_KWH,
         )

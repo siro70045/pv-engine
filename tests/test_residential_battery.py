@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from residential.battery_scenario import (
     BATTERY_COST_EUR_KWH,
+    BATTERY_FIXED_EUR,
     DEFAULT_BATTERY_KWH,
     BatteryScenarioComparison,
     compare_battery_scenarios,
@@ -124,7 +125,7 @@ class TestCapexBatteria:
 
     def test_delta_capex_uguale_a_costo_batteria(self):
         cmp = _run_std()
-        expected_delta = DEFAULT_BATTERY_KWH * BATTERY_COST_EUR_KWH
+        expected_delta = BATTERY_FIXED_EUR + DEFAULT_BATTERY_KWH * BATTERY_COST_EUR_KWH
         assert abs(cmp.tradeoff.delta_capex_eur - expected_delta) < 50.0, (
             f"delta_capex {cmp.tradeoff.delta_capex_eur:.0f} € ≠ "
             f"atteso {expected_delta:.0f} € (costo batteria)"

@@ -100,7 +100,7 @@ Stima pubblica con 5 input form: Comune, tipologia scuola (4 voci: elementare/me
 
 - **Etichetta "marginale"**: NPV/capex < 10% in 25 anni. L'NPV è già al netto del 5% di sconto, quindi la soglia corrisponde a un IRR di circa il 6%: margine sottile sopra il rendimento richiesto (correzione audit §6.3; la vecchia nota "≈0,4% annuo" era sbagliata). Inserita tra "accettabile" e "negativo". Esempio: nord 4.500 kWh → NPV €101 / capex €8.600 = 1,2% → "marginale" con testo esplicito sulla fragilità. La soglia si scala con il capex (10% di €8.600 = €860 per 3 kWp).
 
-- **Orientamento tetto**: valori Literal — `sud` (180°), `sud_est_sud_ovest` (200°), `est` (90°) e `ovest` (270°) separati dal 20 nov 2026 (rese diverse a seconda del sito), `est_o_ovest` storico = modellato come est (prudente), `nord` (0°), `non_so` (225° SW, ipotesi prudente). Tilt 30° assunto e dichiarato nelle assunzioni. `est_o_ovest` modella UNA sola falda esposta a est O a ovest (non due falde); un impianto su due falde richiede il Livello 2. Con TMY reale: S=4046, SSW=4025, SW=3858, W=3274, N=2280 kWh per 3 kWp a Albinea 4.500 kWh/anno.
+- **Orientamento tetto**: valori Literal — `sud` (180°), `sud_est_sud_ovest` (200°), `est` (90°) e `ovest` (270°) separati dal 20 nov 2026 (rese diverse a seconda del sito), `est_o_ovest` storico = modellato come est, `nord` (0°), `non_so` (225° SW, ipotesi prudente). Tilt 30° assunto e dichiarato nelle assunzioni. `est_o_ovest` modella UNA sola falda esposta a est O a ovest (non due falde); un impianto su due falde richiede il Livello 2. Con TMY reale: S=4046, SSW=4025, SW=3858, W=3274, N=2280 kWh per 3 kWp a Albinea 4.500 kWh/anno.
 
 **FASE 2b+2c ✅ COMPLETATA (14 set 2026, commit `2272ae2`)** — Scenario elettrificazione:
 - `gas_smc_annui` (opz.): SCOP calcolato da TMY + tipo terminali; senza gas → benchmark 33 kWh/m² + nota indicativa
@@ -129,11 +129,44 @@ Decise da Sirot dopo `docs/audit-matematico.md`. Tutte abbassano le stime reside
 - **Batteria**: €1.200 fissi + €550/kWh (≈790 €/kWh a 5 kWh), sostituzione 450 €/kWh (era 380). **O&M**: 15 €/kWp/anno +2%/anno (era 1% del capex). Fonti nel report di ricerca del 20 nov 2026.
 - **Effetto netto** (6 casi tipo, Albinea): togliendo gli errori ottimisti E il costo gonfiato, NPV simili a prima ma payback più corti (es. famiglia 3.500 kWh, 2 kWp: +1.184 €, 8,8 anni); Borzano 1,5 kWp −96 € (negativo). Ora ogni numero ha una fonte. Aperto: tasso di sconto 5% (con 3% ≈ +1.000 € su Borzano).
 
+## Livello 2 — decisioni prese (20 nov 2026)
+
+Decisioni di Sirot, da implementare con la Livello 2. Prima versione: richiesta senza pagamento, report preparato in modo semi-automatico (motore + revisione di Sirot).
+
+### Tasso di sconto
+- **Resta 5% nominale.** Il report completo mostra l'NPV anche al **3% e al 4%** (già calcolato: `ScenarioOut.npv_per_tasso`).
+- Motivo: il BTP decennale rendeva il 4,35% lordo il 12/11/2026 (≈3,8% netto dopo il 12,5% di tasse); il fotovoltaico ha in più un rischio (resa, regole, guasti), quindi un punto di premio è difendibile. Fonte: QuiFinanza, spread e rendimenti 12/11/2026 — https://quifinanza.it/economia/finanza/spread-btp-bund-12-novembre-2026/1023908/
+- Frase nel risultato quando NPV < 0 e rientro < 25 anni: "Recuperi la spesa, ma il guadagno complessivo resta sotto quello di un investimento prudente al 5% annuo, il riferimento che usiamo." (sito, `CasaResultView.tsx`).
+
+### Ombre
+- **Lontane (colline, montagne): già nei dati PVGIS** — vedi Problemi noti. Nessun calcolo aggiuntivo.
+- **Vicine: il form chiede cose osservabili, non percentuali.** "Ci sono alberi o edifici più alti del tuo tetto, entro una ventina di metri?" (sì / no / non so); se sì: "Da che lato?" (sud / est / ovest) e "Quanto fanno ombra sul tetto?" (qualche ora / buona parte del giorno). Comignoli e antenne non si chiedono: restano nel forfait del 3%.
+- **Classi → perdita annua di produzione** (impianto con inverter di stringa; stima NOSTRA tarata sui livelli NREL, da dichiarare nel report):
+
+| Risposta | Perdita centrale | Fascia |
+|---|---|---|
+| Nessun ostacolo più alto del tetto vicino | 3% (forfait attuale) | 2-4% |
+| Ostacolo a est o a ovest, qualche ora | 6% | 4-10% |
+| Ostacolo a sud, qualche ora | 12% | 8-19% |
+| Ostacolo per buona parte del giorno | 20% | 15-26% |
+| Non so | 6%, banda larga, caso segnalato a Sirot | 3-15% |
+
+- **Con ombra, il report consiglia ottimizzatori o microinverter**: nei test NREL recuperano circa il 25-35% della perdita da ombra (la luce bloccata resta persa).
+- **Revisione di Sirot**: conferma o corregge la classe guardando la foto aerea della mappa ed eventuali 1-2 foto dell'utente dal giardino verso il tetto.
+- **Avviso automatico**: `sunshineQuantiles` di Google con scarto ampio → "tetto probabilmente ombreggiato, da controllare" (solo rilevatore, mai fattore correttivo).
+- **Fonti**:
+  - NREL/PVEL, test affiancato su tetti residenziali con ombra (sintesi: Cali Energy, "Solar Panels and Shade", 2026): case con l'8%, il 19% e il 26% di sole annuo perso per ombra → inverter di stringa −6,5% / −19% / −26% di energia, ottimizzatori o microinverter circa −5% / −15% / −20%; recupero medio 25-35%. https://cali-energy.com/blog/solar-shade-and-trees-california — whitepaper SolarEdge sullo stesso studio: https://knowledge-center.solaredge.com/sites/kc/files/performance_of_pv_topologies_under_shaded_conditions.pdf
+  - "Shading-Aware Rooftop PV Placement" (arXiv 2609.23021): su impianti esistenti le ombre di vicinato e dettagli del tetto tolgono in mediana lo 0,31%, al massimo il 2,67% dell'energia annua (campione sbilanciato verso impianti ben progettati) → conferma che comignoli e simili stanno nel forfait. https://arxiv.org/pdf/2609.23021
+
+### Costi (fonti della ricalibrazione)
+- IEA PVPS National Survey Report Italia 2024 (GSE, RSE, ENEA): residenziale < 10 kW chiavi in mano 1,39 €/W IVA esclusa, 1,53 €/W inclusa. https://iea-pvps.org/wp-content/uploads/2025/10/NSR-of-PV-Power-Applications-in-Italy-2024.pdf
+- Ritiro dedicato: prezzo minimo garantito FV 2026 0,0475 €/kWh (ARERA, +1,4% FOI); scambio sul posto chiuso per impianti in esercizio dopo il 29/05/2025 (delibera ARERA 78/2025/R/efr).
+
 ## Problemi noti
 
 - ✅ **Orizzonte lontano (colline, montagne) — GIÀ NEI DATI PVGIS** (verificato 20 nov 2026, `~/l2/horizon_check.py`): il TMY v5_2 con `usehorizon=1` azzera il diretto quando il sole è dietro il terreno (metadato `use_horizon: true, horizon_db: DEM-calculated`). Ad Albinea, settore 225-240° (Appennino, pomeriggi invernali) sotto 4° di altezza: diretto 0 su 37/37 ore; settore est (pianura) presente. Il profilo NON arriva nella risposta, quindi `_is_horizon_shaded` del motore resta inattivo: corretto, evita il doppio conteggio.
 - ✅ **Orario del sole — CORRETTO (20 nov 2026)**: la posizione del sole è calcolata a `hour + irradiance_time_offset` letto da PVGIS (`PVGISLocation.irradiance_time_offset_h`, 0,1756 h ad Albinea; anche dall'header CSV), non più a `hour + 0.5`. Offset assente (TMY sintetici, vecchie cache) → 0,5 come prima; la cache su disco senza offset viene riscaricata. Effetto su 3 kWp 30° ad Albinea: sud +0,1%, sud-ovest −1,9%, est +3,3%, ovest −3,0% (ora est ≈ +2% rispetto a ovest: colline a sud-ovest). Il "est −4%" dell'audit era questo artefatto. Cambiano di poco anche i numeri pubblici delle scuole. Il percorso pvlib (non installato) usa ancora l'inizio dell'ora.
-- 🟠 **Ombre vicine — APERTO**: nessun modello d'ombra reale. Forfait 3% (`solar.py`), dataLayers Google non disponibili per account SEE, `usehorizon=1` richiesto a PVGIS ma il profilo d'orizzonte non arriva nel client (nota: il metadato della cache dice `use_horizon: true, horizon_db: DEM-calculated` — da verificare se PVGIS lo applica già dentro il TMY). Sirot: "troveremo un modo efficiente". Ottimista in collina/valle e con ostacoli vicini.
+- 🟠 **Ombre vicine — DECISO, da implementare con la Livello 2** (vedi sezione Livello 2): nessun modello d'ombra reale. Forfait 3% (`solar.py`), dataLayers Google non disponibili per account SEE, `usehorizon=1` richiesto a PVGIS ma il profilo d'orizzonte non arriva nel client (nota: il metadato della cache dice `use_horizon: true, horizon_db: DEM-calculated` — da verificare se PVGIS lo applica già dentro il TMY). Sirot: "troveremo un modo efficiente". Ottimista in collina/valle e con ostacoli vicini.
 
 - Discrepanza ~10% tra produzione Borzano 100 kWp simulata (131.763 kWh/anno motore standalone, no pvlib) vs valore dichiarato nei banner sito/PDF (~120.000 kWh/anno). Da risolvere prima del lancio settembre 2026 con pvlib in produzione Railway.
 - Variabile Railway `ENVIRONMENT=production` non ancora impostata (cosmetico).

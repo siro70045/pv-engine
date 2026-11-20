@@ -49,6 +49,10 @@ def _load_from_disk(lat_r: float, lon_r: float) -> Optional[TMYResult]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if "irradiance_time_offset_h" not in data.get("location", {}):
+            # Written before the sun-time fix (20 nov 2026): refetch so the
+            # irradiance offset is known.
+            return None
         return _tmy_from_dict(data)
     except Exception as e:
         logger.warning("Disk cache miss (corrupt %s): %s", path.name, e)

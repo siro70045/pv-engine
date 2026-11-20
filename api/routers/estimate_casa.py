@@ -162,16 +162,17 @@ _AVVISO_SOVRADIMENSIONAMENTO_RATIO = 1.50
 
 # Azimuth mapping for user-selected roof orientation.
 # Conventions: 0°=N, 90°=E, 180°=S, 270°=W.
-# est / ovest are separate: on the Albinea TMY east yields ~4 % less than west
-# (audit §L.3 h). Legacy est_o_ovest is kept for old clients and modelled as EAST
-# (the less favourable of the two = prudent).
+# est / ovest are separate: their yield differs by site (Albinea, after the
+# sun-time fix: east ~2 % MORE than west, hills to the south-west). The audit's
+# "east −4 %" was mostly the hour-centre artefact. Legacy est_o_ovest is kept
+# for old clients and modelled as east.
 # non_so uses 225° (SW) as a prudent middle-ground for unknown orientation.
 _ORIENTAMENTO_AZIMUTH: dict[str, float] = {
     "sud":               180.0,
     "sud_est_sud_ovest": 200.0,
     "est":               90.0,
     "ovest":             270.0,
-    "est_o_ovest":       90.0,    # legacy: modellato come est (prudente)
+    "est_o_ovest":       90.0,    # legacy: modellato come est
     "nord":              0.0,
     "non_so":            225.0,
 }
@@ -236,8 +237,8 @@ _ORIENTAMENTO_DESC: dict[str, str] = {
                         "un impianto su due falde richiede l'analisi di Livello 2)",
     "ovest":            "OVEST (azimuth 270°, una sola falda — produzione circa l'80% rispetto a sud pieno; "
                         "un impianto su due falde richiede l'analisi di Livello 2)",
-    "est_o_ovest":      "EST O OVEST — una sola falda, calcolata come est (azimuth 90°, la meno favorevole "
-                        "delle due: ipotesi prudente; un impianto su due falde richiede l'analisi di Livello 2)",
+    "est_o_ovest":      "EST O OVEST — una sola falda, calcolata come est (azimuth 90°; "
+                        "un impianto su due falde richiede l'analisi di Livello 2)",
     "nord":             "NORD (azimuth 0°, esposizione sfavorevole — produzione ~55-60% rispetto a sud pieno)",
     "non_so":           "SUD-OVEST (azimuth 225°, ipotesi prudente per orientamento non noto — "
                         "produzione ~90-95% rispetto a sud pieno; l'orientamento reale può "

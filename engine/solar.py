@@ -813,11 +813,16 @@ def _simulate_standalone(
     """
     loc     = tmy.location
     horizon = loc.horizon_profile
+    time_offset = (loc.irradiance_time_offset_h
+                   if getattr(loc, "irradiance_time_offset_h", None) is not None else 0.5)
     results: list[HourlySolarResult] = []
 
     for rec in tmy.hourly:
         doy  = _day_of_year(rec.month, rec.day)
-        hour_utc = rec.hour + 0.5   # centre of hour
+        # Sun position at the instant the irradiance refers to. PVGIS/SARAH data
+        # are not hour-centred (Albinea: HH:10.5); using HH:30 skewed east/west
+        # faces by ±3 % (fix 20 nov 2026). Unknown offset → hour centre.
+        hour_utc = rec.hour + time_offset
 
         # Solar position
         zen, az = _solar_position(loc.latitude, loc.longitude, rec.month, rec.day, hour_utc)

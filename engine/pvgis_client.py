@@ -108,8 +108,12 @@ class PVGISLocation:
     longitude: float
     elevation_m: float
     country: str
-    dataset: str          # e.g. "PVGIS-SARAH3"
+    dataset: str          # e.g. "PVGIS-SARAH2"
     horizon_profile: list[float] = field(default_factory=list)  # azimuth-dependent horizon [°]
+    # Instant within each hour that the satellite irradiance refers to [h after
+    # HH:00], from PVGIS `inputs.location.irradiance_time_offset` (0.1756 at
+    # Albinea). None = unknown → solar.py falls back to the hour centre (0.5).
+    irradiance_time_offset_h: Optional[float] = None
 
 
 @dataclass
@@ -129,6 +133,7 @@ class TMYResult:
                 "country": self.location.country,
                 "dataset": self.location.dataset,
                 "horizon_profile": list(self.location.horizon_profile),
+                "irradiance_time_offset_h": self.location.irradiance_time_offset_h,
             },
             "hourly": [
                 {
@@ -162,6 +167,10 @@ def _tmy_from_dict(data: dict) -> TMYResult:
         country=str(loc.get("country", "unknown")),
         dataset=str(loc.get("dataset", "unknown")),
         horizon_profile=[float(v) for v in loc.get("horizon_profile", [])],
+        irradiance_time_offset_h=(
+            float(loc["irradiance_time_offset_h"])
+            if loc.get("irradiance_time_offset_h") is not None else None
+        ),
     )
     hourly = [
         HourlyRecord(
@@ -318,6 +327,10 @@ def _parse_tmy(raw: dict) -> TMYResult:
         country     = str(loc_raw.get("country", "unknown")),
         dataset     = str(meta_raw.get("radiation_db", "unknown")),
         horizon_profile = [float(h.get("elevation", 0)) for h in horizon_raw],
+        irradiance_time_offset_h = (
+            float(loc_raw["irradiance_time_offset"])
+            if loc_raw.get("irradiance_time_offset") is not None else None
+        ),
     )
 
     # ── Hourly records ──
@@ -544,9 +557,15 @@ def parse_pvgis_csv(csv_text: str) -> TMYResult:
 
     # ── 1. Extract header metadata ──────────────────────────────────────────
     lat = lon = elev = 0.0
+    time_offset: Optional[float] = None
     for line in lines[:10]:
         stripped = line.strip()
-        if stripped.lower().startswith("latitude"):
+        if stripped.lower().startswith("irradiance time offset"):
+            try:
+                time_offset = float(stripped.split(":")[-1].strip())
+            except ValueError:
+                pass
+        elif stripped.lower().startswith("latitude"):
             try:
                 lat = float(stripped.split(":")[-1].strip())
             except ValueError:
@@ -624,8 +643,9 @@ def parse_pvgis_csv(csv_text: str) -> TMYResult:
         longitude       = lon,
         elevation_m     = elev,
         country         = "",           # not present in CSV format
-        dataset         = "PVGIS-SARAH3",
+        dataset         = "PVGIS-SARAH2",
         horizon_profile = [],           # not present in CSV format
+        irradiance_time_offset_h = time_offset,
     )
     monthly = _aggregate_monthly(hourly)
 

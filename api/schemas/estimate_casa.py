@@ -80,7 +80,7 @@ class EstimateCasaRequest(BaseModel):
             "'sud'=ottimale (azimuth 180°); "
             "'sud_est_sud_ovest'=leggermente deviato, ~20° dal sud (azimuth 200°); "
             "'est'=falda esposta a est (azimuth 90°); 'ovest'=falda esposta a ovest (azimuth 270°); "
-            "'est_o_ovest'=valore storico, modellato come est (il meno favorevole); "
+            "'est_o_ovest'=valore storico, modellato come est; "
             "'nord'=falda esposta a nord, sfavorevole (azimuth 0°); "
             "'non_so'=orientamento ignoto — si assume sud-ovest (azimuth 225°) come ipotesi prudente."
         ),

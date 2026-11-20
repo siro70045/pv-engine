@@ -539,12 +539,12 @@ class TestAvvertenzeFragilita:
 # ── 16b. Correzioni audit (20 nov 2026) ──────────────────────────────────────
 
 class TestCorrezioniAudit:
-    def test_est_produce_meno_di_ovest(self, client):
+    def test_est_e_ovest_sotto_il_sud(self, client):
         prod = {}
-        for ori in ("est", "ovest"):
+        for ori in ("sud", "est", "ovest"):
             body = client.post("/estimate/casa", json={**_BASE_PROXY, "orientamento": ori, "potenza_kwp": 3.0}).json()
             prod[ori] = body["produzione_annua_kwh"]
-        assert prod["est"] < prod["ovest"], prod
+        assert prod["est"] < prod["sud"] and prod["ovest"] < prod["sud"], prod
 
     def test_est_o_ovest_legacy_uguale_a_est(self, client):
         prod = {}

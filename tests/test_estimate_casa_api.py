@@ -1467,3 +1467,82 @@ def test_avviso_ombra_google_borzano_assente(google_client):
         **_BORZANO_LATLON, "conferma_tetto": True, "tipo_abitazione": "casa",
     }).json()
     assert body["tetto_rilevato"]["ombra_probabile"] is False
+
+
+# ── Report completo (Livello 2, passo 4) ──────────────────────────────────────
+
+@pytest.fixture(scope="module")
+def report_body(client):
+    r = client.post("/estimate/casa", json={**_BASE_BOLLETTA, "report": True})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+class TestReport:
+    def test_assente_di_default(self, client):
+        b = client.post("/estimate/casa", json=_BASE_BOLLETTA).json()
+        assert b["report"] is None
+
+    def test_flussi_25_anni_e_cumulato(self, report_body):
+        rep = report_body["report"]
+        for key in ("flussi_senza_batteria", "flussi_con_batteria"):
+            fl = rep[key]
+            assert len(fl) == 25 and fl[0]["anno"] == 1
+        sb = rep["flussi_senza_batteria"]
+        capex = report_body["senza_batteria"]["capex_eur"]
+        assert sb[-1]["cumulato_eur"] == pytest.approx(
+            -capex + sum(f["netto_eur"] for f in sb), abs=25)
+        # inverter replacement shows up in year 12
+        assert sb[11]["sostituzioni_eur"] > 0
+        assert all(f["detrazione_eur"] == 0 for f in sb[10:])
+
+    def test_curve_per_ogni_taglia(self, report_body):
+        curve = report_body["report"]["curve_taglie"]
+        assert {c["kwp"] for c in curve} == {t["kwp"] for t in report_body["taglie_confronto"]}
+        assert all(len(c["cumulato_eur"]) == 25 for c in curve)
+
+    def test_sensibilita_base_uguale_alla_stima(self, report_body):
+        npv = report_body["senza_batteria"]["npv_eur"]
+        voci = report_body["report"]["sensibilita"]
+        for leva in ("tasso", "prezzo_cessione", "prezzo_acquisto", "detrazione", "costo"):
+            basi = [v for v in voci if v["leva"] == leva and v["base"]]
+            assert len(basi) == 1
+            assert basi[0]["npv_eur"] == pytest.approx(npv, abs=2)
+
+    def test_co2_tutta_la_produzione(self, report_body):
+        co2 = report_body["report"]["co2"]
+        prod1 = report_body["report"]["flussi_senza_batteria"][0]["produzione_kwh"]
+        assert co2["kg_anno1"] == pytest.approx(prod1 * co2["fattore_kg_kwh"], abs=2)
+        assert report_body["co2_evitata_kg_anno"] == pytest.approx(
+            report_body["produzione_annua_kwh"] * co2["fattore_kg_kwh"], abs=2)
+        assert "ISPRA" in co2["fonte"]
+
+    def test_preventivi_richiedono_report(self, client):
+        r = client.post("/estimate/casa", json={
+            **_BASE_BOLLETTA,
+            "preventivi": [{"kwp": 3.0, "prezzo_totale_eur": 6_000}],
+        })
+        assert r.status_code == 422
+
+    def test_preventivo_al_prezzo_del_modello_coincide(self, client, report_body):
+        """A quote equal to our model price for the primary kWp reproduces our NPV."""
+        kwp = report_body["kwp_ipotizzato"]
+        r = client.post("/estimate/casa", json={
+            **_BASE_BOLLETTA, "report": True,
+            "preventivi": [
+                {"etichetta": "Uguale", "kwp": kwp, "prezzo_totale_eur": report_body["capex_indicativo_eur"]},
+                {"kwp": kwp, "prezzo_totale_eur": report_body["capex_indicativo_eur"] * 1.3},
+                {"kwp": kwp, "prezzo_totale_eur": report_body["capex_indicativo_eur"] / 1.1,
+                 "prezzo_iva_inclusa": False, "batteria_kwh": 5},
+            ],
+        })
+        assert r.status_code == 200, r.text
+        prev = r.json()["report"]["preventivi"]
+        assert prev[0]["etichetta"] == "Uguale"
+        assert prev[0]["npv_eur"] == pytest.approx(report_body["senza_batteria"]["npv_eur"], abs=2)
+        assert prev[1]["etichetta"] == "Preventivo B"
+        assert prev[1]["npv_eur"] < prev[0]["npv_eur"]
+        # IVA esclusa → +10 %: same total as quote A, but with a battery
+        assert prev[2]["prezzo_iva_inclusa_eur"] == pytest.approx(prev[0]["prezzo_iva_inclusa_eur"], abs=1)
+        assert prev[2]["autosufficienza_pct"] > prev[0]["autosufficienza_pct"]
+        assert "Batteria" in prev[2]["nota"]

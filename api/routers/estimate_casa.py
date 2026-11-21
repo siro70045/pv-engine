@@ -34,7 +34,6 @@ Constraints (non-negotiable):
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 import sys
 from dataclasses import dataclass
@@ -50,6 +49,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from api.schemas.estimate import CandidatoComune, ComuneRisolto, RangeLowHigh
 from api.schemas.estimate_casa import (
     BeneficioBreakdown,
+    Co2Out,
+    CurvaTaglia,
+    FlussoAnno,
     DeltaVsBase,
     EstimateCasaRequest,
     EstimateCasaResponse,
@@ -57,12 +59,15 @@ from api.schemas.estimate_casa import (
     MetricheScenarioAlternativo,
     NpvTasso,
     OmbraOut,
+    PreventivoNpv,
+    ReportOut,
     ScenarioAlternativoOut,
     ScenarioOut,
     TagliaOut,
     TettoRilevato,
     TradeoffOut,
     VerdettoPV,
+    VoceSensibilita,
 )
 from residential.shading import (
     ShadingClass,
@@ -98,7 +103,7 @@ from engine.energy_balance import (
     GridTariff,
     simulate_lifetime,
 )
-from engine.energy_vectors import BuildingEnergyProfile, TERMINAL_SUPPLY_TEMP_C, TerminalType
+from engine.energy_vectors import TERMINAL_SUPPLY_TEMP_C, TerminalType
 from engine.heat_pump import calc_h_tr_from_annual, calc_hourly_thermal_demand
 from engine.loads import (
     DHWSystem,
@@ -127,6 +132,7 @@ from residential.battery_scenario import (
     battery_capex_eur,
     compare_battery_scenarios,
     inverter_replacement_cost_eur,
+    run_scenario,
 )
 from residential.estimate_defaults import (
     _DHW_KWH,
@@ -135,17 +141,20 @@ from residential.estimate_defaults import (
     build_residential_consumption_estimate,
 )
 from residential.incentives import calc_irpef_deduction
+from residential.quote_check import price_with_vat
+from residential.report import (
+    CO2_FONTE,
+    CO2_KG_PER_KWH as _CO2_RESIDENZIALE_KG_PER_KWH,
+    co2_evitata as _co2_report,
+    sensibilita as _sensibilita,
+)
 from school.comuni import Comune, lookup_comune
 
 logger = logging.getLogger("pv_engine_api.estimate_casa")
 
 router = APIRouter(prefix="/estimate/casa", tags=["estimate"])
 
-# Italian grid CO₂ factor [kg/kWh] — single source of truth (ENTSO-E IT mix 2023)
-_CO2_KG_PER_KWH = next(
-    f.default for f in dataclasses.fields(BuildingEnergyProfile)
-    if f.name == "co2_electricity_kg_per_kwh"
-)
+# CO₂ factor: residential/report.CO2_KG_PER_KWH (ISPRA 2026, all production).
 
 # Battery taglia thresholds [kWh/year → kWh nominal]
 _BATTERY_KWH_TIERS = [
@@ -487,6 +496,163 @@ def _compute_verdetto(
         etichetta=etichetta,
         autosufficienza_pct=round(autosufficienza_pct, 1),
         testo=testo,
+    )
+
+
+# ── Full report helpers ───────────────────────────────────────────────────────
+
+def _flussi(sr: ScenarioResult) -> list[FlussoAnno]:
+    return [
+        FlussoAnno(
+            anno=cf.year,
+            produzione_kwh=round(cf.pv_production_kWh, 0),
+            autoconsumo_kwh=round(cf.self_consumed_kWh, 0),
+            ceduta_kwh=round(cf.grid_export_kWh, 0),
+            risparmio_bolletta_eur=round(cf.energy_saving_eur, 0),
+            ricavi_cessione_eur=round(cf.export_revenue_eur, 0),
+            detrazione_eur=round(cf.tax_benefit_eur, 0),
+            manutenzione_eur=round(cf.om_cost_eur, 0),
+            sostituzioni_eur=round(cf.replacement_cost_eur, 0),
+            netto_eur=round(cf.net_cash_flow_eur, 0),
+            cumulato_eur=round(cf.cumulative_cash_flow_eur, 0),
+        )
+        for cf in sr.economics.cash_flows
+    ]
+
+
+def _build_report(
+    *,
+    req: EstimateCasaRequest,
+    kwp: float,
+    auto_dimensionato: bool,
+    cmp_centrale: BatteryScenarioComparison,
+    pv_capex: float,
+    taglia_data: dict,
+    taglia_label,
+    simulate_kwp,
+    demand_Wh: list[float],
+    consumo_kwh: float,
+) -> ReportOut:
+    sb = cmp_centrale.senza_batteria
+    flows = sb.economics.cash_flows
+
+    # Cumulative curve per size (no battery)
+    curve: list[CurvaTaglia] = []
+    for kv in sorted(taglia_data):
+        td = taglia_data[kv]
+        label = taglia_label(kv)
+        if not auto_dimensionato and abs(kv - kwp) < 0.01:
+            label = "scelta"
+        curve.append(CurvaTaglia(
+            label=label,
+            kwp=round(kv, 1),
+            capex_eur=float(td.capex),
+            cumulato_eur=[round(cf.cumulative_cash_flow_eur, 0)
+                          for cf in td.cmp.senza_batteria.economics.cash_flows],
+        ))
+
+    voci = _sensibilita(
+        flows, pv_capex,
+        rate_base=DEFAULT_DISCOUNT_RATE,
+        prezzo_cessione_base=DEFAULT_EXPORT_PRICE_EUR_KWH,
+        abitazione_principale=req.abitazione_principale,
+        irpef_annua_stimata=req.irpef_annua_stimata,
+        capex_banda=tuple(float(x) for x in estimate_pv_cost_residential_range(kwp)),
+    )
+
+    kg1, t_tot = _co2_report(flows)
+    co2 = Co2Out(
+        fattore_kg_kwh=_CO2_RESIDENZIALE_KG_PER_KWH,
+        fonte=CO2_FONTE,
+        kg_anno1=kg1,
+        t_totale=t_tot,
+        anni=len(flows),
+        nota=(
+            "Contiamo tutta l'energia prodotta, anche quella ceduta alla rete: ogni kWh "
+            "immesso sostituisce un kWh che le centrali avrebbero prodotto. Il fattore è "
+            "quello di oggi; con più rinnovabili nella rete scenderà, quindi il totale "
+            "sui 25 anni è un limite alto."
+        ),
+    )
+
+    # Installer quotes, simulated with this house's consumption and roof
+    prev_out: list[PreventivoNpv] = []
+    for i, q in enumerate(req.preventivi):
+        price = price_with_vat(q.prezzo_totale_eur, q.prezzo_iva_inclusa)
+        hit = next((k for k in taglia_data if abs(k - q.kwp) < 0.01), None)
+        if hit is not None:
+            pv_h, prod = taglia_data[hit].pv_hourly_Wh, taglia_data[hit].produzione_kwh
+        else:
+            pv_h, prod = simulate_kwp(q.kwp)
+        sr = run_scenario(
+            label="preventivo",
+            pv_hourly_Wh=pv_h,
+            demand_hourly_Wh=demand_Wh,
+            pv_kwp=q.kwp,
+            pv_capex_eur=price,          # the whole quoted price, battery included
+            battery_kwh=q.batteria_kwh,
+            battery_capex=0.0,
+            abitazione_principale=req.abitazione_principale,
+            irpef_annua_stimata=req.irpef_annua_stimata,
+        )
+        ratio = prod / consumo_kwh if consumo_kwh > 0 else 0.0
+        verd = _compute_verdetto(
+            min(sr.payback_anni, 99.0), sr.npv_eur, sr.autosufficienza_pct,
+            _compute_beneficio_breakdown(sr), prod_ratio=ratio, capex_eur=price,
+        )
+        pb = min(sr.payback_anni, 99.0)
+        segno = "+" if sr.npv_eur >= 0 else "−"
+        npv_txt = f"{segno}€{_fmt_it(abs(sr.npv_eur))}"
+        if pb >= 99.0:
+            nota = f"Con i tuoi consumi questo impianto non si ripaga in 25 anni ({npv_txt} dopo 25 anni)."
+        else:
+            nota = (
+                f"Con i tuoi consumi recuperi la spesa in circa {pb:.1f} anni".replace(".", ",")
+                + f"; dopo 25 anni il risultato è {npv_txt}."
+            )
+        if q.batteria_kwh > 0:
+            nota += f" Batteria da {q.batteria_kwh:g} kWh".replace(".", ",") + " inclusa nel prezzo e nel calcolo."
+        if ratio > _AVVISO_SOVRADIMENSIONAMENTO_RATIO:
+            nota += (
+                f" Produce circa {ratio:.1f} volte il tuo consumo".replace(".", ",")
+                + ": gran parte dell'energia andrebbe ceduta alla rete a circa 0,06 €/kWh."
+            )
+        prev_out.append(PreventivoNpv(
+            etichetta=q.etichetta or f"Preventivo {chr(65 + i)}",
+            kwp=q.kwp,
+            batteria_kwh=q.batteria_kwh,
+            prezzo_iva_inclusa_eur=round(price, 0),
+            produzione_stimata_kwh=round(prod, 0),
+            autosufficienza_pct=sr.autosufficienza_pct,
+            detrazione_effettiva_eur=round(sr.detrazione_effettiva_eur, 0),
+            npv_eur=round(sr.npv_eur, 0),
+            payback_anni=round(pb, 1),
+            irr_pct=sr.irr_pct,
+            etichetta_verdetto=verd.etichetta,
+            nota=nota,
+        ))
+
+    return ReportOut(
+        kwp=round(kwp, 1),
+        anni=len(flows),
+        tasso_sconto_pct=DEFAULT_DISCOUNT_RATE * 100,
+        flussi_senza_batteria=_flussi(sb),
+        flussi_con_batteria=_flussi(cmp_centrale.con_batteria),
+        curve_taglie=curve,
+        sensibilita=[VoceSensibilita(**v.__dict__) for v in voci],
+        co2=co2,
+        preventivi=prev_out,
+        note=[
+            "I flussi sono in euro di ciascun anno, non scontati: il cumulato parte dal costo "
+            "dell'impianto (negativo) e diventa positivo nell'anno in cui hai recuperato la spesa.",
+            "La sensibilità sposta una sola ipotesi alla volta, sull'impianto senza batteria, "
+            "e lascia tutte le altre come nella stima. Il guadagno dopo 25 anni è sempre "
+            f"confrontato con un investimento prudente al {DEFAULT_DISCOUNT_RATE * 100:.0f}% annuo, "
+            "tranne nella riga del tasso.",
+            "Un tempo di rientro di 99 anni significa che la spesa non si recupera entro 25 anni.",
+            "I preventivi sono calcolati con i tuoi consumi e il tuo tetto, al prezzo che ti hanno "
+            "chiesto (IVA inclusa), con le stesse ipotesi della stima.",
+        ],
     )
 
 
@@ -958,9 +1124,10 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
             testo=testo_neg,
         )
 
-    # ── 16. CO₂ evitata (central, self-consumed only) ─────────────────────────
-    self_consumed_kwh = produzione_annua_kwh * sb_central.autoconsumo_pct / 100.0
-    co2_evitata = round(self_consumed_kwh * _CO2_KG_PER_KWH, 0)
+    # ── 16. CO₂ evitata (central, ALL production — decision 21/11/2026) ──────
+    # An exported kWh also displaces grid generation, so it counts too.
+    # Factor: ISPRA 2026, electricity consumption 2024 (residential/report.py).
+    co2_evitata = round(produzione_annua_kwh * _CO2_RESIDENZIALE_KG_PER_KWH, 0)
 
     # ── 17. Assumptions block ─────────────────────────────────────────────────
     zona_label = f"Zona climatica {comune.zona_climatica} — fonte DPR 412/93 (tabella ENEA)"
@@ -1362,6 +1529,22 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
             nota=_nota,
         )
 
+    # ── 20. Full report (Livello 2, step 4) ───────────────────────────────────
+    report_out: Optional[ReportOut] = None
+    if req.report:
+        report_out = _build_report(
+            req=req,
+            kwp=kwp,
+            auto_dimensionato=auto_dimensionato,
+            cmp_centrale=cmp_centrale,
+            pv_capex=float(pv_capex),
+            taglia_data=taglia_data,
+            taglia_label=_taglia_label,
+            simulate_kwp=_simulate_kwp,
+            demand_Wh=_scale(centrale),
+            consumo_kwh=centrale,
+        )
+
     return EstimateCasaResponse(
         comune_risolto=ComuneRisolto(
             nome=comune.nome,
@@ -1402,4 +1585,5 @@ async def estimate_casa(request: Request, req: EstimateCasaRequest) -> EstimateC
         scenari_alternativi=scenari_alternativi,
         tetto_rilevato=tetto_rilevato,
         ombra=ombra_out,
+        report=report_out,
     )

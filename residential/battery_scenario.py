@@ -204,6 +204,116 @@ class BatteryScenarioComparison:
     tradeoff: BatteryTradeoff
 
 
+def run_scenario(
+    label: str,
+    pv_hourly_Wh: list[float],
+    demand_hourly_Wh: list[float],
+    pv_kwp: float,
+    pv_capex_eur: float,
+    battery_kwh: float = 0.0,
+    battery_capex: float = 0.0,
+    abitazione_principale: bool = True,
+    irpef_annua_stimata: Optional[float] = None,
+    import_price_eur_kwh: float = DEFAULT_IMPORT_PRICE_EUR_KWH,
+    export_price_eur_kwh: float = DEFAULT_EXPORT_PRICE_EUR_KWH,
+    analysis_years: int = DEFAULT_ANALYSIS_YEARS,
+    discount_rate: float = DEFAULT_DISCOUNT_RATE,
+    escalation_rate: float = DEFAULT_ESC_RATE,
+    export_escalation_rate: float = DEFAULT_EXPORT_ESC_RATE,
+) -> ScenarioResult:
+    """One residential scenario with an explicit capex.
+
+    Used by compare_battery_scenarios (model prices) and by the full report for
+    an installer's quote, where the capex is the quoted price (battery included;
+    pass battery_capex=0 and the whole price as pv_capex_eur).
+    """
+    tariff = GridTariff(
+        import_price_eur_kWh=import_price_eur_kwh,
+        export_price_eur_kWh=export_price_eur_kwh,
+    )
+    fin = FinancialParameters(
+        discount_rate=discount_rate,
+        energy_price_escalation=escalation_rate,
+        export_price_escalation=export_escalation_rate,
+        analysis_years=analysis_years,
+    )
+    battery = BatterySystem(capacity_kWh=battery_kwh)
+
+    # Anni di sostituzione per degrado
+    repl_years = find_battery_replacement_years(
+        battery,
+        lifetime_years=analysis_years,
+        threshold=BATTERY_REPLACEMENT_THRESHOLD,
+        cycles_per_year=BATTERY_CYCLES_PER_YEAR,
+    ) if battery_kwh > 0 else []
+
+    total_capex = pv_capex_eur + battery_capex
+    # The engine takes €/kWh figures: pass the effective ones (fixed part included).
+    bat_eff_eur_kwh = battery_capex / battery_kwh if battery_kwh > 0 else 0.0
+
+    # Detrazione IRPEF — sul CAPEX totale (PV + batteria, stesso tetto 96k)
+    detr = calc_irpef_deduction(
+        total_capex,
+        abitazione_principale=abitazione_principale,
+        irpef_annua_stimata=irpef_annua_stimata,
+    )
+    # Percentuale per il motore: detrazione EFFETTIVA (limitata dalla capienza
+    # IRPEF quando l'utente la dichiara; = totale con capienza piena). Audit §5.2.
+    detr_pct_for_engine = (
+        detr.detrazione_effettiva_eur / total_capex * 100.0
+        if total_capex > 0 else 0.0
+    )
+
+    investment = InvestmentCost(
+        pv_cost_eur_kWp=pv_capex_eur / pv_kwp,
+        peak_power_kWp=pv_kwp,
+        battery_cost_eur_kWh=bat_eff_eur_kwh,
+        battery_capacity_kWh=battery_kwh,
+    )
+    opex = OperatingCost(
+        om_pct_of_capex_per_yr=0.0,
+        om_fixed_eur_yr=OM_EUR_PER_KWP_YR * pv_kwp,
+        inverter_replacement_year=INVERTER_REPLACEMENT_YEAR,
+        inverter_replacement_cost_eur=inverter_replacement_cost_eur(pv_kwp),
+        battery_replacement_years=repl_years,
+        battery_replacement_cost_eur_kWh=BATTERY_REPLACEMENT_COST_EUR_KWH,
+    )
+    incentives = ItalianIncentives(
+        detrazione_fiscale_pct=detr_pct_for_engine,
+        detrazione_spread_years=10,
+        ammortamento_accelerato=False,
+        transizione_5_0_pct=0.0,
+    )
+    base_inp = EnergyBalanceInput(
+        pv_production_hourly_Wh=pv_hourly_Wh,
+        demand_hourly_Wh=demand_hourly_Wh,
+        battery=battery,
+        tariff=tariff,
+        peak_power_kWp=pv_kwp,
+    )
+    yearly = simulate_lifetime(base_inp, lifetime_years=analysis_years)
+    econ = calc_economics(yearly, investment, opex, fin, incentives)
+
+    yr1 = yearly[0]
+    return ScenarioResult(
+        label=label,
+        capex_eur=round(total_capex, 0),
+        battery_kwh=battery_kwh,
+        battery_replacement_years=repl_years,
+        autoconsumo_pct=round(yr1.self_consumption_rate * 100, 1),
+        autosufficienza_pct=round(yr1.self_sufficiency_rate * 100, 1),
+        payback_anni=econ.payback_simple_yr,
+        payback_scontato_anni=econ.payback_discounted_yr,
+        npv_eur=econ.npv_eur,
+        irr_pct=econ.irr_pct,
+        detrazione_totale_eur=detr.detrazione_totale_eur,
+        detrazione_effettiva_eur=detr.detrazione_effettiva_eur,
+        risparmio_annuo_anno1_eur=econ.year1_saving_eur + econ.year1_export_revenue_eur,
+        produzione_anno1_kwh=econ.year1_production_kWh,
+        economics=econ,
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # FUNZIONE PRINCIPALE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -273,98 +383,26 @@ def compare_battery_scenarios(
     if battery_kwh < 0:
         raise ValueError(f"battery_kwh deve essere ≥ 0, ricevuto {battery_kwh!r}")
 
-    tariff = GridTariff(
-        import_price_eur_kWh=import_price_eur_kwh,
-        export_price_eur_kWh=export_price_eur_kwh,
-    )
-    fin = FinancialParameters(
-        discount_rate=discount_rate,
-        energy_price_escalation=escalation_rate,
-        export_price_escalation=export_escalation_rate,
-        analysis_years=analysis_years,
-    )
-
-    results = []
-    for label, bat_kwh in [("senza_batteria", 0.0), ("con_batteria", battery_kwh)]:
-        battery = BatterySystem(capacity_kWh=bat_kwh)
-
-        # Anni di sostituzione per degrado
-        repl_years = find_battery_replacement_years(
-            battery,
-            lifetime_years=analysis_years,
-            threshold=BATTERY_REPLACEMENT_THRESHOLD,
-            cycles_per_year=BATTERY_CYCLES_PER_YEAR,
-        )
-
-        # CAPEX
-        pv_capex = pv_kwp * pv_cost_eur_kwp
-        bat_capex = battery_capex_eur(bat_kwh, battery_cost_eur_kwh)
-        total_capex = pv_capex + bat_capex
-        # The engine takes a €/kWh figure: pass the effective one (fixed part included).
-        bat_eff_eur_kwh = bat_capex / bat_kwh if bat_kwh > 0 else 0.0
-
-        # Detrazione IRPEF — sul CAPEX totale (PV + batteria, stesso tetto 96k)
-        detr = calc_irpef_deduction(
-            total_capex,
+    results = [
+        run_scenario(
+            label=label,
+            pv_hourly_Wh=pv_hourly_Wh,
+            demand_hourly_Wh=demand_hourly_Wh,
+            pv_kwp=pv_kwp,
+            pv_capex_eur=pv_kwp * pv_cost_eur_kwp,
+            battery_kwh=bat_kwh,
+            battery_capex=battery_capex_eur(bat_kwh, battery_cost_eur_kwh),
             abitazione_principale=abitazione_principale,
             irpef_annua_stimata=irpef_annua_stimata,
+            import_price_eur_kwh=import_price_eur_kwh,
+            export_price_eur_kwh=export_price_eur_kwh,
+            analysis_years=analysis_years,
+            discount_rate=discount_rate,
+            escalation_rate=escalation_rate,
+            export_escalation_rate=export_escalation_rate,
         )
-        # Percentuale per il motore: detrazione EFFETTIVA (limitata dalla capienza
-        # IRPEF quando l'utente la dichiara; = totale con capienza piena). Audit §5.2.
-        detr_pct_for_engine = (
-            detr.detrazione_effettiva_eur / total_capex * 100.0
-            if total_capex > 0 else 0.0
-        )
-
-        investment = InvestmentCost(
-            pv_cost_eur_kWp=pv_cost_eur_kwp,
-            peak_power_kWp=pv_kwp,
-            battery_cost_eur_kWh=bat_eff_eur_kwh,
-            battery_capacity_kWh=bat_kwh,
-        )
-        opex = OperatingCost(
-            om_pct_of_capex_per_yr=0.0,
-            om_fixed_eur_yr=OM_EUR_PER_KWP_YR * pv_kwp,
-            inverter_replacement_year=INVERTER_REPLACEMENT_YEAR,
-            inverter_replacement_cost_eur=inverter_replacement_cost_eur(pv_kwp),
-            battery_replacement_years=repl_years,
-            battery_replacement_cost_eur_kWh=BATTERY_REPLACEMENT_COST_EUR_KWH,
-        )
-        incentives = ItalianIncentives(
-            detrazione_fiscale_pct=detr_pct_for_engine,
-            detrazione_spread_years=10,
-            ammortamento_accelerato=False,
-            transizione_5_0_pct=0.0,
-        )
-
-        base_inp = EnergyBalanceInput(
-            pv_production_hourly_Wh=pv_hourly_Wh,
-            demand_hourly_Wh=demand_hourly_Wh,
-            battery=battery,
-            tariff=tariff,
-            peak_power_kWp=pv_kwp,
-        )
-        yearly = simulate_lifetime(base_inp, lifetime_years=analysis_years)
-        econ = calc_economics(yearly, investment, opex, fin, incentives)
-
-        yr1 = yearly[0]
-        results.append(ScenarioResult(
-            label=label,
-            capex_eur=round(total_capex, 0),
-            battery_kwh=bat_kwh,
-            battery_replacement_years=repl_years,
-            autoconsumo_pct=round(yr1.self_consumption_rate * 100, 1),
-            autosufficienza_pct=round(yr1.self_sufficiency_rate * 100, 1),
-            payback_anni=econ.payback_simple_yr,
-            payback_scontato_anni=econ.payback_discounted_yr,
-            npv_eur=econ.npv_eur,
-            irr_pct=econ.irr_pct,
-            detrazione_totale_eur=detr.detrazione_totale_eur,
-            detrazione_effettiva_eur=detr.detrazione_effettiva_eur,
-            risparmio_annuo_anno1_eur=econ.year1_saving_eur + econ.year1_export_revenue_eur,
-            produzione_anno1_kwh=econ.year1_production_kWh,
-            economics=econ,
-        ))
+        for label, bat_kwh in [("senza_batteria", 0.0), ("con_batteria", battery_kwh)]
+    ]
 
     senza, con = results[0], results[1]
 

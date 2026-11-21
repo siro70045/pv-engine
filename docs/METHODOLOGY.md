@@ -310,7 +310,7 @@ Aver calcolato la produzione fotovoltaica oraria e i consumi orari non è ancora
 | Vettore | Prezzo | Unità | Escalation | CO₂ |
 |---|---:|---|---:|---:|
 | Gas naturale | 0.95 | €/Sm³ | 3.0 %/anno | 1.96 kg/Sm³ |
-| Elettricità | 0.25 | €/kWh | 2.5 %/anno | 0.233 kg/kWh |
+| Elettricità | 0.25 | €/kWh | 2.5 %/anno | 0.233 kg/kWh (residenziale: 0,1926, §7-bis) |
 | Diesel (gasolio risc.) | 1.45 | €/L | 2.5 %/anno | 2.64 kg/L |
 | GPL | 0.85 | €/kg | 2.5 %/anno | 1.63 kg/kg |
 | Teleriscaldamento | 0.09 | €/kWh_th | 2.0 %/anno | 0.070 kg/kWh_th |
@@ -604,6 +604,15 @@ L'endpoint `POST /estimate/casa` (`api/routers/estimate_casa.py`) produce la sti
 
 - **Verifica dei preventivi (Livello 2).** L'utente inserisce i numeri di fino a tre preventivi (kWp, prezzo, batteria, produzione promessa): nessun documento viene caricato o conservato. Il prezzo è confrontato con la fascia di mercato della stessa taglia (§6.1, più la batteria); la produzione promessa con la nostra simulazione sullo stesso tetto (oltre il +15% la segnaliamo come gonfiata e invitiamo a chiedere i dati usati); la taglia con il consumo. Valutiamo solo i numeri, non la qualità tecnica dei componenti (`api/routers/verifica_preventivo.py`, `residential/quote_check.py`).
 
+- **Report completo (Livello 2).** Con `report: true` la stima aggiunge un blocco con i numeri che il motore calcola già (`residential/report.py`):
+  - il flusso di cassa anno per anno per 25 anni, con e senza batteria: risparmio in bolletta, cessione, rata di detrazione, manutenzione, sostituzioni (inverter all'anno 12, batteria quando scende all'80%), netto e cumulato;
+  - la curva del cumulato per ogni taglia candidata;
+  - una tabella di sensibilità che sposta **una sola ipotesi alla volta** sull'impianto senza batteria: tasso di sconto 3/4/5%; prezzo di cessione 0,04/0,06/0,08 €/kWh; prezzo dell'energia acquistata −20%/+20%; detrazione 50%/36%/nessuna (con la capienza IRPEF dichiarata); costo al minimo e al massimo della fascia di mercato (§6.1), con la detrazione ricalcolata sul nuovo costo;
+  - fino a tre preventivi dell'utente, simulati con i suoi consumi e il suo tetto al prezzo chiesto (IVA al 10% aggiunta se il prezzo è senza IVA, batteria compresa nel prezzo e simulata).
+
+  La sensibilità è ricalcolata dalla tabella dei flussi senza rifare la simulazione oraria. Non è un'approssimazione: i kWh autoconsumati e ceduti non dipendono dai prezzi e i flussi in euro sono lineari in ciascun prezzo; manutenzione e sostituzione dell'inverter dipendono dai kWp, non dal costo. I test (`tests/test_residential_report.py`) confrontano ogni leva con una simulazione completa rifatta da capo.
+- **CO₂ evitata.** Contiamo **tutta** l'energia prodotta, anche quella ceduta: ogni kWh immesso sostituisce un kWh prodotto dalle centrali della rete (decisione del 21 novembre 2026; prima contavamo solo l'autoconsumo e sottostimavamo il beneficio). Il fattore è quello ISPRA dei consumi elettrici 2024, **192,6 g CO₂/kWh** (ISPRA, *Settore elettrico: emissioni di CO₂ e altri impatti*, Rapporti 430/2026, tab. 1.7). È il più basso dei tre pubblicati (produzione lorda 2024: 209,4; consumi 2025 provvisori: 199,6), quindi è una scelta prudente. Sui 25 anni usiamo il fattore di oggi: con più rinnovabili in rete scenderà, quindi il totale è un limite alto. Le scuole usano ancora 0,233 kg/kWh (ENTSO-E 2023, §5).
+
 ---
 
 ## 8. Validazione e calibrazione
@@ -664,6 +673,7 @@ Pubblicate **integralmente** perché siano l'argomento di chi vuole contestare i
 
 - **Prezzi vettori escalation uniforme.** Il modello non distingue tra "gas che sale del 5 %" e "elettricità ferma": ciascun vettore ha la sua escalation costante. La volatilità storica reale (es. 2022) non è catturabile con un singolo tasso.
 - **Tariffa export fissa.** Il residenziale usa il ritiro dedicato a 0,06 €/kWh rivalutato dell'1,5%/anno; il prezzo reale varia ora per ora ed è soggetto alle regole ARERA. Lo Scambio sul Posto non è più attivabile per i nuovi impianti (dal 29/05/2025).
+- **Sensibilità a una leva alla volta.** La tabella del report residenziale non combina scenari (per esempio cessione bassa *e* detrazione al 36%): gli effetti si sommano solo approssimativamente e il caso peggiore combinato non è mostrato.
 - **Costi residenziali da indagini, non da preventivi.** La curva di costo (§6.1) viene da dati GSE/IEA e listini; non è ancora confrontata con un campione di preventivi reali. La verifica dei preventivi della Livello 2 servirà anche a questo.
 - **Consumi residenziali stimati su un caso.** Il proxy dei consumi senza bolletta e il profilo orario "famiglia fuori casa di giorno" sono calibrati su una sola bolletta reale (Borzano, 4 persone, tutto gas). Lo scenario pompa di calore senza dati del gas usa un benchmark per m² che su quel caso sovrastimava il consumo di circa un terzo.
 - **Incentivi rappresentano lo "stato attuale".** Norme italiane cambiano spesso (Superbonus 110/90/65/50, Transizione 5.0 in evoluzione). Il modello fotografa lo stato al momento della stima — non garantisce che gli incentivi saranno ancora disponibili o invariati al momento dell'effettiva realizzazione.

@@ -13,6 +13,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 from api.schemas.estimate import CandidatoComune, ComuneRisolto, RangeLowHigh
+from api.schemas.verifica_preventivo import PreventivoIn
 
 
 class FaldaRilevata(BaseModel):
@@ -199,10 +200,27 @@ class EstimateCasaRequest(BaseModel):
         default=None, description="Per quanto fanno ombra sul tetto: qualche ora o buona parte del giorno."
     )
 
+    # ── Full report (optional, Livello 2) ─────────────────────────────────────
+    # False = Livello 1 response, unchanged. True = adds the "report" block:
+    # 25-year cash flows, cumulative curve per size, sensitivity, CO₂, quotes.
+    report: bool = Field(
+        default=False,
+        description="True per aggiungere il report completo (flussi anno per anno, sensibilità, CO₂).",
+    )
+    preventivi: list[PreventivoIn] = Field(
+        default_factory=list, max_length=3,
+        description=(
+            "Preventivi ricevuti (solo numeri, nessun documento): simulati con i consumi "
+            "e il tetto di questa stima. Richiede report=true."
+        ),
+    )
+
     @model_validator(mode="after")
     def _ombra_completa(self) -> "EstimateCasaRequest":
         if self.ombra_ostacoli == "si" and (not self.ombra_lati or self.ombra_durata is None):
             raise ValueError("con ombra_ostacoli='si' servono ombra_lati e ombra_durata")
+        if self.preventivi and not self.report:
+            raise ValueError("i preventivi si valutano solo nel report completo: imposta report=true")
         return self
 
 
@@ -303,6 +321,75 @@ class TagliaOut(BaseModel):
     tradeoff: TradeoffOut
 
 
+class FlussoAnno(BaseModel):
+    """One year of the cash-flow table (€ of that year, not discounted)."""
+    anno: int
+    produzione_kwh: float
+    autoconsumo_kwh: float
+    ceduta_kwh: float
+    risparmio_bolletta_eur: float
+    ricavi_cessione_eur: float
+    detrazione_eur: float
+    manutenzione_eur: float
+    sostituzioni_eur: float             # inverter (year 12) and battery replacements
+    netto_eur: float
+    cumulato_eur: float                 # starts from −capex: crosses 0 at the payback
+
+
+class CurvaTaglia(BaseModel):
+    """Cumulative cash of one size, no battery: one value per year (1..25)."""
+    label: str
+    kwp: float
+    capex_eur: float
+    cumulato_eur: list[float]
+
+
+class VoceSensibilita(BaseModel):
+    leva: Literal["tasso", "prezzo_cessione", "prezzo_acquisto", "detrazione", "costo"]
+    variante: str
+    base: bool                          # True = the value used in the estimate
+    npv_eur: float
+    payback_anni: float                 # 99 = not recovered within 25 years
+
+
+class Co2Out(BaseModel):
+    fattore_kg_kwh: float
+    fonte: str
+    kg_anno1: float                     # on ALL production (self-consumed + exported)
+    t_totale: float                     # over the whole horizon, degradation included
+    anni: int
+    nota: str
+
+
+class PreventivoNpv(BaseModel):
+    etichetta: str
+    kwp: float
+    batteria_kwh: float
+    prezzo_iva_inclusa_eur: float
+    produzione_stimata_kwh: float       # our estimate for this kWp on this roof
+    autosufficienza_pct: float
+    detrazione_effettiva_eur: float
+    npv_eur: float
+    payback_anni: float
+    irr_pct: float
+    etichetta_verdetto: Literal["ottimo", "buono", "accettabile", "marginale", "negativo"]
+    nota: str
+
+
+class ReportOut(BaseModel):
+    """Full report for the primary size (kwp), central consumption."""
+    kwp: float
+    anni: int
+    tasso_sconto_pct: float
+    flussi_senza_batteria: list[FlussoAnno]
+    flussi_con_batteria: list[FlussoAnno]
+    curve_taglie: list[CurvaTaglia]
+    sensibilita: list[VoceSensibilita]  # no-battery scenario, one lever at a time
+    co2: Co2Out
+    preventivi: list[PreventivoNpv] = []
+    note: list[str]
+
+
 class EstimateCasaResponse(BaseModel):
     # ── Comune ───────────────────────────────────────────────────────────────
     comune_risolto: ComuneRisolto
@@ -354,3 +441,6 @@ class EstimateCasaResponse(BaseModel):
 
     # ── Near shading (present when ombra_ostacoli was provided) ──────────────
     ombra: Optional[OmbraOut] = None
+
+    # ── Full report (present when report=true) ───────────────────────────────
+    report: Optional[ReportOut] = None
